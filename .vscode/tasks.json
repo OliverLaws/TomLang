@@ -1,0 +1,18 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build and run TomLang",
+            "type": "shell",
+            "command": "bash build.sh && ./build/tomlang.exe",
+            "options": {
+                "shell": {
+                    "executable": "C:\\msys64\\usr\\bin\\bash.exe",
+                    "args": ["--login", "-c"]
+                },
+                "env": { "MSYSTEM": "UCRT64", "CHERE_INVOKING": "1" }
+            },
+            "group": { "kind": "build", "isDefault": true }
+        }
+    ]
+}
