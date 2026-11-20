@@ -10,6 +10,7 @@ global PrimDup
 global PrimDrop
 global PrimSwap
 global PrimPrint
+global PrimSayStr
 global PrimBye
 global PrimCall
 global PrimExit
@@ -17,6 +18,10 @@ global PrimBranch
 global PrimBranch0
 global PrimFetch
 global PrimStore
+global PrimToR
+global PrimFromR
+global PrimAnd
+global PrimOr
 global PrimLess
 global PrimGreater
 global PrimEq
@@ -25,6 +30,7 @@ global PrimLessEq
 global PrimGreaterEq
 extern PrintNumber
 extern PrintNewLine
+extern PrintString
 extern ExitProcess
 
 %macro CmpPrim 2
@@ -82,6 +88,20 @@ PrimMod:
     DPush rdx
     NEXT
 
+PrimAnd:
+    DPop rax
+    DPop rbx
+    and rbx, rax
+    DPush rbx
+    NEXT
+
+PrimOr:
+    DPop rax
+    DPop rbx
+    or rbx, rax
+    DPush rbx
+    NEXT
+
 PrimDup:
     mov rax, [r15-8]
     DPush rax
@@ -101,6 +121,14 @@ PrimSwap:
 PrimPrint:
     DPop rcx
     call PrintNumber
+    call PrintNewLine
+    NEXT
+
+PrimSayStr:
+    mov rcx, [r14]
+    mov rdx, [r14+8]
+    add r14, 16
+    call PrintString
     call PrintNewLine
     NEXT
 
@@ -140,6 +168,16 @@ PrimStore:
     DPop rax
     DPop rbx
     mov [rax], rbx
+    NEXT
+
+PrimToR:
+    DPop rax
+    RPush rax
+    NEXT
+
+PrimFromR:
+    RPop rax
+    DPush rax
     NEXT
 
 CmpPrim PrimLess, setl

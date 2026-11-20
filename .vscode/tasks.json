@@ -13,6 +13,18 @@
                 "env": { "MSYSTEM": "UCRT64", "CHERE_INVOKING": "1" }
             },
             "group": { "kind": "build", "isDefault": true }
+        },
+        {
+            "label": "Run TomLang file",
+            "type": "shell",
+            "command": "bash build.sh && ./build/tomlang.exe \"$(cygpath -u '${file}')\"",
+            "options": {
+                "shell": {
+                    "executable": "C:\\msys64\\usr\\bin\\bash.exe",
+                    "args": ["--login", "-c"]
+                },
+                "env": { "MSYSTEM": "UCRT64", "CHERE_INVOKING": "1" }
+            }
         }
     ]
 }

@@ -20,13 +20,17 @@ extern PrimEq
 extern PrimNotEq
 extern PrimLessEq
 extern PrimGreaterEq
-extern CompIf
-extern CompElse
-extern CompThen
-extern CompBegin
-extern CompUntil
-extern CompAgain
 extern CompVariable
+extern SayWord
+extern SetWord
+extern IfWord
+extern OtherwiseWord
+extern EndWord
+extern RepeatWord
+extern StopWord
+extern SkipWord
+extern DoWord
+extern ReturnWord
 
 section .data
 DefWord "+", PrimAdd
@@ -47,13 +51,18 @@ DefWord "==", PrimEq
 DefWord "!=", PrimNotEq
 DefWord "<=", PrimLessEq
 DefWord ">=", PrimGreaterEq
-DefImm "if", CompIf
-DefImm "else", CompElse
-DefImm "then", CompThen
-DefImm "begin", CompBegin
-DefImm "until", CompUntil
-DefImm "again", CompAgain
 DefImm "var", CompVariable
+DefImm "say", SayWord
+DefImm "set", SetWord
+DefImm "keep", SetWord
+DefImm "if", IfWord
+DefImm "otherwise", OtherwiseWord
+DefImm "end", EndWord
+DefImm "repeat", RepeatWord
+DefImm "stop", StopWord
+DefImm "skip", SkipWord
+DefImm "do", DoWord
+DefImm "return", ReturnWord
 Latest dq LastEntry
 
 section .text

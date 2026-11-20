@@ -24,6 +24,11 @@
     jmp rax
 %endmacro
 
+%macro CompilePrim 1
+    lea rcx, [rel %1]
+    call Compile
+%endmacro
+
 %xdefine LastEntry 0
 
 %macro DefEntry 3

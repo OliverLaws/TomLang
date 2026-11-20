@@ -4,30 +4,29 @@ global CodeBuf
 global Here
 global Compile
 global DictHere
-global SavedHere
+global FnEntry
 global CreateEntry
-global CompIf
-global CompElse
-global CompThen
-global CompBegin
-global CompUntil
-global CompAgain
+global BeginDef
+global EndDef
+global CreateVar
+global AllocSlot
+global CopyString
+global MakeText
 global CompVariable
 extern Latest
 extern NextToken
-extern PrimLit
-extern PrimExit
-extern PrimBranch
-extern PrimBranch0
 
 section .bss
-CodeBuf   resq 4096
-DictSpace resq 16384
+CodeBuf   resq 65536
+DictSpace resq 65536
+DataSpace resq 65536
 Here      resq 1
 SavedHere resq 1
+FnEntry   resq 1
 
 section .data
 DictHere dq DictSpace
+DataHere dq DataSpace
 
 section .text
 Compile:
@@ -58,71 +57,102 @@ CreateEntry:
     mov [rel Here], rax
     ret
 
-CompIf:
-    lea rcx, [rel PrimBranch0]
-    call Compile
-    mov rax, [rel Here]
-    DPush rax
-    xor ecx, ecx
-    call Compile
-    ret
-
-CompElse:
-    lea rcx, [rel PrimBranch]
-    call Compile
-    mov r8, [rel Here]
-    xor ecx, ecx
-    call Compile
-    DPop rax
-    mov rdx, [rel Here]
-    mov [rax], rdx
-    DPush r8
-    ret
-
-CompThen:
-    DPop rax
-    mov rdx, [rel Here]
-    mov [rax], rdx
-    ret
-
-CompBegin:
-    mov rax, [rel Here]
-    DPush rax
-    ret
-
-CompUntil:
-    lea rcx, [rel PrimBranch0]
-    call Compile
-    DPop rcx
-    call Compile
-    ret
-
-CompAgain:
-    lea rcx, [rel PrimBranch]
-    call Compile
-    DPop rcx
-    call Compile
-    ret
-
-CompVariable:
+BeginDef:
     mov rax, [rel Here]
     mov [rel SavedHere], rax
     mov rax, [rel DictHere]
     mov [rel Here], rax
-    call NextToken
-    mov rcx, rax
     call CreateEntry
-    lea rcx, [rel PrimLit]
-    call Compile
-    mov rcx, [rel Here]
-    add rcx, 16
-    call Compile
-    lea rcx, [rel PrimExit]
-    call Compile
-    xor ecx, ecx
-    call Compile
+    mov rax, [rel Here]
+    mov [rel DictHere], rax
+    mov rax, [rel Latest]
+    mov [rel FnEntry], rax
+    ret
+
+EndDef:
     mov rax, [rel Here]
     mov [rel DictHere], rax
     mov rax, [rel SavedHere]
     mov [rel Here], rax
+    mov qword [rel FnEntry], 0
+    ret
+
+CreateVar:
+    mov r8, [rel DataHere]
+    add r8, 7
+    and r8, -8
+    mov rax, [rel Latest]
+    mov [r8], rax
+    mov [rel Latest], r8
+    mov byte [r8 + 16], 3
+    mov [r8 + 17], dl
+    xor r9d, r9d
+.Copy:
+    cmp r9, rdx
+    je .CopyDone
+    mov al, [rcx + r9]
+    mov [r8 + 18 + r9], al
+    inc r9
+    jmp .Copy
+.CopyDone:
+    lea rax, [r8 + 18 + rdx + 7]
+    and rax, -8
+    mov qword [rax], 0
+    add rax, 8
+    mov qword [rax], 0
+    mov [r8 + 8], rax
+    lea r9, [rax + 8]
+    mov [rel DataHere], r9
+    ret
+
+AllocSlot:
+    mov rax, [rel DataHere]
+    add rax, 7
+    and rax, -8
+    mov qword [rax], 0
+    lea r8, [rax + 8]
+    mov [rel DataHere], r8
+    ret
+
+CopyString:
+    mov rax, [rel DataHere]
+    xor r9d, r9d
+.Copy:
+    cmp r9, rdx
+    je .Done
+    mov r8b, [rcx + r9]
+    mov [rax + r9], r8b
+    inc r9
+    jmp .Copy
+.Done:
+    lea r8, [rax + rdx]
+    mov [rel DataHere], r8
+    ret
+
+MakeText:
+    mov rax, [rel DataHere]
+    add rax, 7
+    and rax, -8
+    mov [rax], rdx
+    xor r9d, r9d
+.Copy:
+    cmp r9, rdx
+    je .Done
+    mov r8b, [rcx + r9]
+    mov [rax + 8 + r9], r8b
+    inc r9
+    jmp .Copy
+.Done:
+    lea r8, [rax + 8 + rdx]
+    mov [rel DataHere], r8
+    ret
+
+CompVariable:
+    call NextToken
+    test rdx, rdx
+    jz .Done
+    mov rcx, rax
+    call CreateVar
+    mov qword [rax - 8], 1
+.Done:
     ret

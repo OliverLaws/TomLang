@@ -1,6 +1,8 @@
 global SetInput
 global NextToken
 global ParseNumber
+global Unread
+global GetInput
 
 section .bss
 InPtr resq 1
@@ -11,6 +13,15 @@ SetInput:
     mov [rel InPtr], rcx
     add rcx, rdx
     mov [rel InEnd], rcx
+    ret
+
+GetInput:
+    mov rax, [rel InPtr]
+    mov rdx, [rel InEnd]
+    ret
+
+Unread:
+    mov [rel InPtr], rcx
     ret
 
 IsWordChar:
@@ -42,13 +53,25 @@ NextToken:
     cmp r8, r9
     jae .End
     cmp byte [r8], ' '
-    jne .Start
+    ja .NotSpace
     inc r8
+    jmp .Skip
+.NotSpace:
+    cmp byte [r8], '#'
+    jne .Start
+.Comment:
+    inc r8
+    cmp r8, r9
+    jae .End
+    cmp byte [r8], 10
+    jne .Comment
     jmp .Skip
 .Start:
     mov r10, r8
     mov cl, [r8]
     inc r8
+    cmp cl, '"'
+    je .String
     call IsWordChar
     test eax, eax
     jz .Symbol
@@ -61,6 +84,14 @@ NextToken:
     jz .Done
     inc r8
     jmp .Run
+.String:
+    cmp r8, r9
+    jae .Done
+    mov cl, [r8]
+    inc r8
+    cmp cl, '"'
+    jne .String
+    jmp .Done
 .Symbol:
     cmp r8, r9
     jae .Done
