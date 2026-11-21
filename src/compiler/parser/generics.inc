@@ -411,6 +411,8 @@ CompileInstance:
     mov qword [rel MakingConst], 0
     mov qword [rel LaterCount], 0
     mov qword [rel ReplaceLen], 0
+    mov rcx, [rel InstanceDepth]
+    call EnterInstanceSpace
     inc qword [rel InstanceDepth]
     mov rcx, [rbx + 24]
     mov rdx, [rbx + 32]
@@ -432,6 +434,8 @@ CompileInstance:
     jmp .Body
 .Done:
     dec qword [rel InstanceDepth]
+    mov rcx, [rel InstanceDepth]
+    call LeaveInstanceSpace
     mov rax, [rel InstanceDepth]
     imul rax, rax, PSize + 256
     lea r12, [rel InstanceSaves]

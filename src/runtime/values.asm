@@ -6,6 +6,8 @@ global PrimDAdd
 global PrimDSub
 global PrimDMul
 global PrimDDiv
+global PrimDFloorDiv
+global PrimDMod
 global PrimDLess
 global PrimDGreater
 global PrimDLessEq
@@ -292,6 +294,37 @@ PrimDDiv:
     lea rcx, [rel ErrDivZero]
     mov edx, ErrDivZeroLen
     jmp Abort
+
+PrimDFloorDiv:
+    DPop rax
+    movq xmm1, rax
+    xorpd xmm2, xmm2
+    ucomisd xmm1, xmm2
+    je PrimDDiv.Zero
+    DPop rax
+    movq xmm0, rax
+    divsd xmm0, xmm1
+    roundsd xmm0, xmm0, 1
+    cvttsd2si rax, xmm0
+    DPush rax
+    NEXT
+
+PrimDMod:
+    DPop rax
+    movq xmm1, rax
+    xorpd xmm2, xmm2
+    ucomisd xmm1, xmm2
+    je PrimDDiv.Zero
+    DPop rax
+    movq xmm0, rax
+    movapd xmm3, xmm0
+    divsd xmm3, xmm1
+    roundsd xmm3, xmm3, 1
+    mulsd xmm3, xmm1
+    subsd xmm0, xmm3
+    movq rax, xmm0
+    DPush rax
+    NEXT
 
 %macro DecCmp 2
 %1:

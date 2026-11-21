@@ -42,6 +42,9 @@ OtherwiseWord:
     IfTok ":", .Colon
     jmp Pushback
 .ElseIf:
+    call SameLine
+    test eax, eax
+    jz Pushback
     call Advance
     call ParseExpr
     call NeedCondition

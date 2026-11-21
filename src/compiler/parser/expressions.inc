@@ -438,9 +438,35 @@ ParseProduct:
     ret
 ArithOp .Mul, ParsePower, PrimMul, PrimDMul
     jmp .Loop
-NumOp .FloorDiv, ParsePower, PrimFloorDiv, TNum
+.FloorDiv:
+    push qword [rel ExprType]
+    call Advance
+    call ParsePower
+    pop rax
+    call NumericPair
+    cmp rax, TDec
+    je .FloorDivDec
+    CompilePrim PrimFloorDiv
+    SetType TNum
     jmp .Loop
-NumOp .Mod, ParsePower, PrimMod, TNum
+.FloorDivDec:
+    CompilePrim PrimDFloorDiv
+    SetType TNum
+    jmp .Loop
+.Mod:
+    push qword [rel ExprType]
+    call Advance
+    call ParsePower
+    pop rax
+    call NumericPair
+    cmp rax, TDec
+    je .ModDec
+    CompilePrim PrimMod
+    SetType TNum
+    jmp .Loop
+.ModDec:
+    CompilePrim PrimDMod
+    SetType TDec
     jmp .Loop
 .Div:
     push qword [rel ExprType]

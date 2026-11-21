@@ -121,6 +121,8 @@ extern PrimTryEnd
 extern PrimLastError
 extern NextToken
 extern DictHere
+extern EnterInstanceSpace
+extern LeaveInstanceSpace
 extern PrimLessEq
 extern TypeTable
 global KindWord
@@ -159,6 +161,8 @@ extern PrimDAdd
 extern PrimDSub
 extern PrimDMul
 extern PrimDDiv
+extern PrimDFloorDiv
+extern PrimDMod
 extern PrimDLess
 extern PrimDGreater
 extern PrimDLessEq

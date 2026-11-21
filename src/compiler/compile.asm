@@ -4,6 +4,8 @@ global CodeBuf
 global Here
 global Compile
 global DictHere
+global EnterInstanceSpace
+global LeaveInstanceSpace
 global FnEntry
 global SavedHere
 global DataSpace
@@ -22,12 +24,18 @@ extern Latest
 extern NextToken
 extern Abort
 
+InstRegion equ 1048576
+
 section .bss
 CombBuf   resb 512
 CodeBuf   resq 1048576
 CodeEnd   resq 64
 DictSpace resq 1048576
 DictEnd   resq 64
+InstSpace resb InstRegion * 8
+InstEnd   resq 64
+InstSaveHere resq 8
+InstSaveEnd  resq 8
 DataSpace resq 2097152
 DataEnd   resq 64
 Here      resq 1
@@ -40,6 +48,12 @@ DataHere dq DataSpace
 CodeEndPtr   dq CodeEnd
 DictStartPtr dq DictSpace
 DictEndPtr   dq DictEnd
+InstHereTab:
+%assign i 0
+%rep 8
+    dq InstSpace + i * InstRegion
+%assign i i + 1
+%endrep
 DataEndPtr   dq DataEnd
 NamePrefixPtr dq 0
 NamePrefixLen dq 0
@@ -93,6 +107,34 @@ LongName:
     cmp %1, [rel DataEndPtr]
     jae TooBig
 %endmacro
+
+EnterInstanceSpace:
+    lea r8, [rel InstSaveHere]
+    mov rax, [rel DictHere]
+    mov [r8 + rcx * 8], rax
+    lea r8, [rel InstSaveEnd]
+    mov rax, [rel DictEndPtr]
+    mov [r8 + rcx * 8], rax
+    lea rdx, [rel InstHereTab]
+    mov rax, [rdx + rcx * 8]
+    mov [rel DictHere], rax
+    lea rdx, [rel InstSpace]
+    imul rax, rcx, InstRegion
+    lea rax, [rdx + rax + InstRegion - 512]
+    mov [rel DictEndPtr], rax
+    ret
+
+LeaveInstanceSpace:
+    lea rdx, [rel InstHereTab]
+    mov rax, [rel DictHere]
+    mov [rdx + rcx * 8], rax
+    lea r8, [rel InstSaveHere]
+    mov rax, [r8 + rcx * 8]
+    mov [rel DictHere], rax
+    lea r8, [rel InstSaveEnd]
+    mov rax, [r8 + rcx * 8]
+    mov [rel DictEndPtr], rax
+    ret
 
 Compile:
     mov rax, [rel Here]
