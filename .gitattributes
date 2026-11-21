@@ -3,3 +3,7 @@
 *.ico binary
 *.vsix binary
 *.exe binary
+
+*.tom linguist-detectable=true
+*.tom linguist-language=Ruby
+TestScripts/* linguist-vendored
