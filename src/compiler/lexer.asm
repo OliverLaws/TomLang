@@ -1,12 +1,17 @@
 global SetInput
 global NextToken
 global ParseNumber
+extern Abort
 global Unread
 global GetInput
 
 section .bss
 InPtr resq 1
 InEnd resq 1
+
+section .data
+ErrBigNumber db "this number is too big (the biggest whole number is 9223372036854775807, use a decimal for bigger)"
+ErrBigNumberLen equ $ - ErrBigNumber
 
 section .text
 SetInput:
@@ -230,7 +235,9 @@ ParseNumber:
     cmp r8d, 9
     ja .Fail
     imul rax, rax, 10
+    jo .Big
     add rax, r8
+    jo .Big
     inc rcx
     dec rdx
     jnz .Loop
@@ -239,3 +246,7 @@ ParseNumber:
 .Fail:
     xor edx, edx
     ret
+.Big:
+    lea rcx, [rel ErrBigNumber]
+    mov edx, ErrBigNumberLen
+    jmp Abort

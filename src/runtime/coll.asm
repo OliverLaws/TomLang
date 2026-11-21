@@ -25,6 +25,8 @@ extern Abort
 extern MakeTextFrom
 
 section .data
+ErrCharRange db "charFrom needs a number from 0 to 255"
+ErrCharRangeLen equ $ - ErrCharRange
 ErrNoKey     db "that key isn't in the map"
 ErrNoKeyLen  equ $ - ErrNoKey
 ErrIndex     db "text index out of range"
@@ -436,12 +438,18 @@ PrimCode:
 
 PrimChar:
     DPop rax
+    cmp rax, 255
+    ja .Bad
     mov [rel CharBuf], al
     lea rcx, [rel CharBuf]
     mov edx, 1
     call MakeTextFrom
     DPush rax
     NEXT
+.Bad:
+    lea rcx, [rel ErrCharRange]
+    mov edx, ErrCharRangeLen
+    jmp Abort
 
 %macro BitOp 2
 %1:

@@ -46,6 +46,8 @@ Pow10:
 align 16
 SignMask     dq 0x7FFFFFFFFFFFFFFF, 0x7FFFFFFFFFFFFFFF
 Half         dq 0.5
+ErrNotDecimal db "that text isn't a decimal number"
+ErrNotDecimalLen equ $ - ErrNotDecimal
 ErrDivZero   db "can't divide by 0"
 ErrDivZeroLen equ $ - ErrDivZero
 StrTrue      db "true"
@@ -337,9 +339,55 @@ PrimTextToDec:
     DPop rax
     lea rcx, [rax + 8]
     mov rdx, [rax]
+.TrimStart:
+    test rdx, rdx
+    jz .Bad
+    cmp byte [rcx], ' '
+    jne .TrimEnd
+    inc rcx
+    dec rdx
+    jmp .TrimStart
+.TrimEnd:
+    cmp byte [rcx + rdx - 1], ' '
+    jne .Check
+    dec rdx
+    jmp .TrimEnd
+.Check:
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    cmp byte [rcx], '-'
+    jne .Scan
+    inc r8
+.Scan:
+    cmp r8, rdx
+    jae .Scanned
+    movzx eax, byte [rcx + r8]
+    inc r8
+    cmp eax, '.'
+    je .Dot
+    sub eax, '0'
+    cmp eax, 9
+    ja .Bad
+    inc r10
+    jmp .Scan
+.Dot:
+    inc r9
+    cmp r9, 1
+    ja .Bad
+    jmp .Scan
+.Scanned:
+    test r10, r10
+    jz .Bad
+    cmp r10, 18
+    ja .Bad
     call ParseDecimalText
     DPush rax
     NEXT
+.Bad:
+    lea rcx, [rel ErrNotDecimal]
+    mov edx, ErrNotDecimalLen
+    jmp Abort
 
 DecToTextObject:
     movq xmm0, rax

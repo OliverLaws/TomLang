@@ -14,6 +14,8 @@ extern SkipWord
 extern DoWord
 extern ReturnWord
 extern ByeWord
+extern NamePrefixLen
+extern NamePrefixPtr
 extern HintElse
 extern HintElif
 extern HintThen
@@ -26,6 +28,8 @@ extern CheckWord
 extern IsWord
 extern TryWord
 extern LaterWord
+extern UseWord
+extern DllWord
 
 section .data
 DefImm "say", SayWord
@@ -46,6 +50,8 @@ DefImm "check", CheckWord
 DefImm "is", IsWord
 DefImm "try", TryWord
 DefImm "later", LaterWord
+DefImm "use", UseWord
+DefImm "dll", DllWord
 DefImm "else", HintElse
 DefImm "elif", HintElif
 DefImm "elseif", HintElif
@@ -87,5 +93,50 @@ FindWord:
     movzx edx, byte [r8 + 16]
     ret
 .NotFound:
+    cmp qword [rel NamePrefixLen], 0
+    je .None
+    cmp byte [rel InRetry], 0
+    jne .None
+    mov r8, [rel NamePrefixLen]
+    lea r9, [r8 + rdx]
+    cmp r9, 250
+    ja .None
+    push rsi
+    push rdi
+    push rcx
+    push rdx
+    lea rdi, [rel RetryBuf]
+    mov rsi, [rel NamePrefixPtr]
+    mov rcx, r8
+    rep movsb
+    pop rdx
+    pop rsi
+    push rsi
+    push rdx
+    mov rcx, rdx
+    rep movsb
+    pop rdx
+    pop rcx
+    pop rdi
+    pop rsi
+    push rcx
+    push rdx
+    lea rcx, [rel RetryBuf]
+    add rdx, [rel NamePrefixLen]
+    mov byte [rel InRetry], 1
+    call FindWord
+    mov byte [rel InRetry], 0
+    test rax, rax
+    jz .Restore
+    add rsp, 16
+    ret
+.Restore:
+    pop rdx
+    pop rcx
+.None:
     xor eax, eax
     ret
+
+section .bss
+InRetry  resb 8
+RetryBuf resb 512

@@ -25,10 +25,16 @@ global PrimBye
 global PrimCall
 global PrimExit
 global PrimCallValue
+global PrimMakeClosure
+extern Alloc
 global PrimTry
 global PrimTryEnd
 global PrimLastError
 global TryDepth
+global FfiVmDepth
+global CbDepth
+global FfiVmStack
+global CbRspStack
 global TryStack
 global LastError
 global PrimBranch
@@ -83,7 +89,11 @@ FalseText      dq 5
                db "false"
 
 section .bss
-TryStack resq 4 * 256
+TryStack resq 8 * 256
+FfiVmDepth resq 1
+CbDepth resq 1
+FfiVmStack resq 3 * 256
+CbRspStack resq 256
 TryDepth resq 1
 LastError resq 1
 
@@ -120,8 +130,14 @@ PrimDiv:
     DPop rax
     test rbx, rbx
     jz DivZero
+    cmp rbx, -1
+    je .MinusOne
     cqo
     idiv rbx
+    DPush rax
+    NEXT
+.MinusOne:
+    neg rax
     DPush rax
     NEXT
 
@@ -130,6 +146,8 @@ PrimFloorDiv:
     DPop rax
     test rbx, rbx
     jz DivZero
+    cmp rbx, -1
+    je .MinusOne
     cqo
     idiv rbx
     test rdx, rdx
@@ -140,12 +158,18 @@ PrimFloorDiv:
 .Push:
     DPush rax
     NEXT
+.MinusOne:
+    neg rax
+    DPush rax
+    NEXT
 
 PrimMod:
     DPop rbx
     DPop rax
     test rbx, rbx
     jz DivZero
+    cmp rbx, -1
+    je .MinusOne
     cqo
     idiv rbx
     test rdx, rdx
@@ -156,6 +180,9 @@ PrimMod:
     add rdx, rbx
 .Push:
     DPush rdx
+    NEXT
+.MinusOne:
+    DPush 0
     NEXT
 
 DivZero:
@@ -238,6 +265,8 @@ PrimSayStr:
 
 PrimBye:
     xor ecx, ecx
+    and rsp, -16
+    sub rsp, 32
     call ExitProcess
 
 PrimCall:
@@ -258,7 +287,7 @@ PrimTry:
     mov rax, [rel TryDepth]
     cmp rax, 256
     jae Overflow
-    shl rax, 5
+    shl rax, 6
     lea rcx, [rel TryStack]
     add rcx, rax
     mov rax, [r14]
@@ -267,6 +296,10 @@ PrimTry:
     mov [rcx + 8], r15
     mov [rcx + 16], rbp
     mov [rcx + 24], r13
+    mov rax, [rel FfiVmDepth]
+    mov [rcx + 32], rax
+    mov rax, [rel CbDepth]
+    mov [rcx + 40], rax
     inc qword [rel TryDepth]
     NEXT
 
@@ -293,6 +326,7 @@ PrimCallValue:
     mov rax, r15
     sub rax, rdx
     mov rbx, [rax]
+    push rbx
 .Shift:
     test rcx, rcx
     jz .Shifted
@@ -303,8 +337,50 @@ PrimCallValue:
     jmp .Shift
 .Shifted:
     sub r15, 8
+    pop rbx
+    test rbx, 1
+    jz .Call
+    dec rbx
+    mov rcx, [rbx + 8]
+    lea rdx, [rbx + 16]
+.Caps:
+    test rcx, rcx
+    jz .CapsDone
+    mov rax, [rdx]
+    DPush rax
+    add rdx, 8
+    dec rcx
+    jmp .Caps
+.CapsDone:
+    mov rbx, [rbx]
+.Call:
     RPush r14
     mov r14, rbx
+    NEXT
+
+PrimMakeClosure:
+    DPop rcx
+    DPop rbx
+    push rcx
+    lea rcx, [rcx * 8 + 16]
+    call Alloc
+    pop rcx
+    mov [rax], rbx
+    mov [rax + 8], rcx
+    mov rdx, rcx
+    shl rdx, 3
+    sub r15, rdx
+    xor edx, edx
+.Copy:
+    cmp rdx, rcx
+    jae .Done
+    mov r8, [r15 + rdx * 8]
+    mov [rax + 16 + rdx * 8], r8
+    inc rdx
+    jmp .Copy
+.Done:
+    inc rax
+    DPush rax
     NEXT
 
 PrimEnter:

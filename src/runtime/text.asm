@@ -1,7 +1,7 @@
 %include "macros.inc"
 
 global PrimSayText
-global Alloc
+extern Alloc
 global PrimConcat
 global PrimToText
 global PrimToNumber
@@ -20,24 +20,16 @@ extern InputBuf
 extern Abort
 
 section .data
-HeapHere     dq HeapSpace
+ErrNotNumber db "that text isn't a whole number"
+ErrNotNumberLen equ $ - ErrNotNumber
 ErrIndex     db "list index out of range"
 ErrIndexLen  equ $ - ErrIndex
 
 section .bss
-HeapSpace resb 16777216
 RandState resq 1
 TmpBuf    resb 24
 
 section .text
-Alloc:
-    mov rax, [rel HeapHere]
-    add rcx, 7
-    and rcx, -8
-    lea r8, [rax + rcx]
-    mov [rel HeapHere], r8
-    ret
-
 MemCopy:
     xor r9d, r9d
 .Loop:
@@ -120,24 +112,46 @@ PrimToNumber:
     DPop rsi
     mov rcx, [rsi]
     lea rsi, [rsi + 8]
-    xor eax, eax
-    xor ebx, ebx
+.TrimStart:
     test rcx, rcx
-    jz .Done
-    cmp byte [rsi], '-'
-    jne .Loop
-    mov ebx, 1
+    jz .Bad
+    cmp byte [rsi], ' '
+    jne .TrimEnd
     inc rsi
     dec rcx
+    jmp .TrimStart
+.TrimEnd:
+    cmp byte [rsi + rcx - 1], ' '
+    jne .Trimmed
+    dec rcx
+    jmp .TrimEnd
+.Trimmed:
+    xor eax, eax
+    xor ebx, ebx
+    cmp byte [rsi], '-'
+    je .Minus
+    cmp byte [rsi], '+'
+    jne .First
+    jmp .Sign
+.Minus:
+    mov ebx, 1
+.Sign:
+    inc rsi
+    dec rcx
+.First:
+    test rcx, rcx
+    jz .Bad
 .Loop:
     test rcx, rcx
     jz .Done
     movzx edx, byte [rsi]
     sub edx, '0'
     cmp edx, 9
-    ja .Done
+    ja .Bad
     imul rax, rax, 10
+    jo .Bad
     add rax, rdx
+    jo .Bad
     inc rsi
     dec rcx
     jmp .Loop
@@ -148,6 +162,10 @@ PrimToNumber:
 .Push:
     DPush rax
     NEXT
+.Bad:
+    lea rcx, [rel ErrNotNumber]
+    mov edx, ErrNotNumberLen
+    jmp Abort
 
 PrimTextEq:
     DPop rdi

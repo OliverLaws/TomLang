@@ -9,14 +9,17 @@ global FieldInfo
 global FindField
 global NewEnum
 global FuncOf
+global VarTypeOf
 extern CopyString
 extern AllocSlot
+extern Abort
 
 %define KList 5
 %define KMap  6
 %define KRec  7
 %define KEnum 8
 %define KFunc 9
+%define KVar  10
 %define MaxTypes 4096
 
 section .data
@@ -34,8 +37,22 @@ FuncTop dq FuncPool
 
 section .bss
 FuncPool resq 16384
+VarIds resq 26
+
+section .data
+ErrTypes db "too many different types in one program"
+ErrTypesLen equ $ - ErrTypes
 
 section .text
+TypesFull:
+    lea rcx, [rel ErrTypes]
+    mov edx, ErrTypesLen
+    jmp Abort
+
+%macro TypeRoom 0
+    cmp qword [rel TypeCount], MaxTypes - 1
+    jae TypesFull
+%endmacro
 TypeKind:
     shl rcx, 5
     lea rax, [rel TypeTable]
@@ -49,6 +66,7 @@ ElemOf:
     ret
 
 NewEnum:
+    TypeRoom
     lea r9, [rel TypeTable]
     mov rax, [rel TypeCount]
     mov r10, rax
@@ -61,6 +79,7 @@ NewEnum:
     ret
 
 FuncOf:
+    TypeRoom
     push rbx
     push rsi
     push rdi
@@ -95,6 +114,10 @@ FuncOf:
     jmp .Done
 .New:
     mov rdi, [rel FuncTop]
+    lea rax, [rdi + rdx * 8]
+    lea rbx, [rel FuncPool + 16384 * 8 - 256]
+    cmp rax, rbx
+    jae TypesFull
     xor ebx, ebx
 .Copy:
     cmp rbx, rdx
@@ -120,11 +143,32 @@ FuncOf:
     pop rbx
     ret
 
+VarTypeOf:
+    lea rdx, [rel VarIds]
+    mov rax, [rdx + rcx * 8]
+    test rax, rax
+    jnz .Done
+    TypeRoom
+    lea r9, [rel TypeTable]
+    mov rax, [rel TypeCount]
+    mov r10, rax
+    shl r10, 5
+    mov qword [r9 + r10], KVar
+    mov [r9 + r10 + 8], rcx
+    mov qword [r9 + r10 + 16], 0
+    mov qword [r9 + r10 + 24], 0
+    inc qword [rel TypeCount]
+    mov [rdx + rcx * 8], rax
+.Done:
+    ret
+
 ListOf:
+    TypeRoom
     mov r8d, KList
     jmp Intern1
 
 MapOf:
+    TypeRoom
     mov r8d, KMap
 
 Intern1:
@@ -212,6 +256,7 @@ FindField:
     ret
 
 InternRecord:
+    TypeRoom
     push rbx
     push rsi
     push rdi

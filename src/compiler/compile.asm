@@ -5,6 +5,12 @@ global Here
 global Compile
 global DictHere
 global FnEntry
+global SavedHere
+global DataSpace
+global DataHere
+global NamePrefixPtr
+global NamePrefixLen
+global ApplyPrefix
 global CreateEntry
 global BeginDef
 global EndDef
@@ -14,11 +20,16 @@ global CopyString
 global MakeText
 extern Latest
 extern NextToken
+extern Abort
 
 section .bss
-CodeBuf   resq 65536
-DictSpace resq 65536
-DataSpace resq 65536
+CombBuf   resb 512
+CodeBuf   resq 1048576
+CodeEnd   resq 64
+DictSpace resq 1048576
+DictEnd   resq 64
+DataSpace resq 2097152
+DataEnd   resq 64
 Here      resq 1
 SavedHere resq 1
 FnEntry   resq 1
@@ -26,17 +37,87 @@ FnEntry   resq 1
 section .data
 DictHere dq DictSpace
 DataHere dq DataSpace
+CodeEndPtr   dq CodeEnd
+DictStartPtr dq DictSpace
+DictEndPtr   dq DictEnd
+DataEndPtr   dq DataEnd
+NamePrefixPtr dq 0
+NamePrefixLen dq 0
+
+ErrTooBig     db "this program is too big (too much code or text)"
+ErrTooBigLen  equ $ - ErrTooBig
+ErrLongName   db "that name is too long (200 letters at most)"
+ErrLongNameLen equ $ - ErrLongName
 
 section .text
+ApplyPrefix:
+    mov r8, [rel NamePrefixLen]
+    test r8, r8
+    jz .Done
+    test rdx, rdx
+    jz .Done
+    lea r9, [r8 + rdx]
+    cmp r9, 250
+    ja LongName
+    push rsi
+    push rdi
+    push rdx
+    push rcx
+    lea rdi, [rel CombBuf]
+    mov rsi, [rel NamePrefixPtr]
+    mov rcx, r8
+    rep movsb
+    pop rsi
+    pop rcx
+    push rcx
+    rep movsb
+    pop rdx
+    lea rcx, [rel CombBuf]
+    add rdx, [rel NamePrefixLen]
+    pop rdi
+    pop rsi
+.Done:
+    ret
+
+TooBig:
+    lea rcx, [rel ErrTooBig]
+    mov edx, ErrTooBigLen
+    jmp Abort
+
+LongName:
+    lea rcx, [rel ErrLongName]
+    mov edx, ErrLongNameLen
+    jmp Abort
+
+%macro DataRoom 1
+    cmp %1, [rel DataEndPtr]
+    jae TooBig
+%endmacro
+
 Compile:
     mov rax, [rel Here]
+    cmp rax, [rel DictStartPtr]
+    jae .Dict
+    cmp rax, [rel CodeEndPtr]
+    jae TooBig
+    jmp .Ok
+.Dict:
+    cmp rax, [rel DictEndPtr]
+    jae TooBig
+.Ok:
     mov [rax], rcx
     add rax, 8
     mov [rel Here], rax
     ret
 
 CreateEntry:
+    cmp rdx, 200
+    ja LongName
+    call ApplyPrefix
     mov r8, [rel Here]
+    lea r9, [r8 + rdx + 64]
+    cmp r9, [rel DictEndPtr]
+    jae TooBig
     mov rax, [rel Latest]
     mov [r8], rax
     mov [rel Latest], r8
@@ -51,7 +132,8 @@ CreateEntry:
     inc r9
     jmp .Copy
 .CopyDone:
-    lea rax, [r8 + 18 + rdx]
+    lea rax, [r8 + 18 + rdx + 7]
+    and rax, -8
     mov [r8 + 8], rax
     mov [rel Here], rax
     ret
@@ -77,9 +159,14 @@ EndDef:
     ret
 
 CreateVar:
+    cmp rdx, 200
+    ja LongName
+    call ApplyPrefix
     mov r8, [rel DataHere]
     add r8, 7
     and r8, -8
+    lea r9, [r8 + rdx + 64]
+    DataRoom r9
     mov rax, [rel Latest]
     mov [r8], rax
     mov [rel Latest], r8
@@ -108,6 +195,8 @@ AllocSlot:
     mov rax, [rel DataHere]
     add rax, 7
     and rax, -8
+    lea r8, [rax + 16]
+    DataRoom r8
     mov qword [rax], 0
     lea r8, [rax + 8]
     mov [rel DataHere], r8
@@ -115,6 +204,8 @@ AllocSlot:
 
 CopyString:
     mov rax, [rel DataHere]
+    lea r8, [rax + rdx + 16]
+    DataRoom r8
     xor r9d, r9d
 .Copy:
     cmp r9, rdx
@@ -132,6 +223,8 @@ MakeText:
     mov rax, [rel DataHere]
     add rax, 7
     and rax, -8
+    lea r8, [rax + rdx + 16]
+    DataRoom r8
     push rbx
     xor r9d, r9d
     xor r10d, r10d
