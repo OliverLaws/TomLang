@@ -5,6 +5,7 @@ global PrintNewLine
 global ReadLine
 global InputBuf
 global LoadFileArg
+global CheckMode
 extern GetStdHandle
 extern WriteFile
 extern ReadFile
@@ -22,6 +23,7 @@ NumBuf    resb 24
 InputBuf  resb 256
 PathBuf   resb 512
 FileBuf   resb 1048576
+CheckMode resq 1
 
 section .data
 NewlineChar  db 10
@@ -153,6 +155,22 @@ LoadFileArg:
 .GotArg:
     cmp byte [rcx], 0
     je .None
+    cmp byte [rcx], '-'
+    jne .NotFlag
+    cmp byte [rcx + 1], '-'
+    jne .NotFlag
+    cmp byte [rcx + 2], 'c'
+    jne .NotFlag
+    mov qword [rel CheckMode], 1
+.SkipFlag:
+    mov al, [rcx]
+    test al, al
+    jz .None
+    cmp al, ' '
+    je .SkipSpaces
+    inc rcx
+    jmp .SkipFlag
+.NotFlag:
     lea rdx, [rel PathBuf]
     mov r8b, ' '
     cmp byte [rcx], '"'

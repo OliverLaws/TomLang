@@ -12,7 +12,6 @@ global CreateVar
 global AllocSlot
 global CopyString
 global MakeText
-global CompVariable
 extern Latest
 extern NextToken
 
@@ -133,26 +132,36 @@ MakeText:
     mov rax, [rel DataHere]
     add rax, 7
     and rax, -8
-    mov [rax], rdx
+    push rbx
     xor r9d, r9d
+    xor r10d, r10d
 .Copy:
     cmp r9, rdx
-    je .Done
+    jae .Done
     mov r8b, [rcx + r9]
-    mov [rax + 8 + r9], r8b
     inc r9
+    cmp r8b, 92
+    jne .Put
+    cmp r9, rdx
+    jae .Put
+    mov r8b, [rcx + r9]
+    inc r9
+    cmp r8b, 'n'
+    jne .NotN
+    mov r8b, 10
+    jmp .Put
+.NotN:
+    cmp r8b, 't'
+    jne .Put
+    mov r8b, 9
+.Put:
+    mov [rax + 8 + r10], r8b
+    inc r10
     jmp .Copy
 .Done:
-    lea r8, [rax + 8 + rdx]
+    mov [rax], r10
+    lea r8, [rax + 8 + r10]
     mov [rel DataHere], r8
+    pop rbx
     ret
 
-CompVariable:
-    call NextToken
-    test rdx, rdx
-    jz .Done
-    mov rcx, rax
-    call CreateVar
-    mov qword [rax - 8], 1
-.Done:
-    ret

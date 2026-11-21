@@ -1,6 +1,7 @@
 %include "macros.inc"
 
 global PrimSayText
+global Alloc
 global PrimConcat
 global PrimToText
 global PrimToNumber
@@ -20,7 +21,7 @@ extern Abort
 
 section .data
 HeapHere     dq HeapSpace
-ErrIndex     db "list index out of range", 10
+ErrIndex     db "list index out of range"
 ErrIndexLen  equ $ - ErrIndex
 
 section .bss

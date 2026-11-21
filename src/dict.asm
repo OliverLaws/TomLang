@@ -2,27 +2,9 @@
 
 global FindWord
 global Latest
-extern PrimAdd
-extern PrimSub
-extern PrimMul
-extern PrimDiv
-extern PrimMod
-extern PrimDup
-extern PrimDrop
-extern PrimSwap
-extern PrimPrint
-extern PrimBye
-extern PrimFetch
-extern PrimStore
-extern PrimLess
-extern PrimGreater
-extern PrimEq
-extern PrimNotEq
-extern PrimLessEq
-extern PrimGreaterEq
-extern CompVariable
 extern SayWord
 extern SetWord
+extern KeepWord
 extern IfWord
 extern OtherwiseWord
 extern EndWord
@@ -31,30 +13,25 @@ extern StopWord
 extern SkipWord
 extern DoWord
 extern ReturnWord
+extern ByeWord
+extern HintElse
+extern HintElif
+extern HintThen
+extern HintFor
+extern HintWhile
+extern HintFunction
+extern HintLocal
+extern KindWord
+extern CheckWord
+extern IsWord
+extern TryWord
+extern LaterWord
 
 section .data
-DefWord "+", PrimAdd
-DefWord "-", PrimSub
-DefWord "*", PrimMul
-DefWord "/", PrimDiv
-DefWord "%", PrimMod
-DefWord "dup", PrimDup
-DefWord "drop", PrimDrop
-DefWord "swap", PrimSwap
-DefWord "print", PrimPrint
-DefWord "bye", PrimBye
-DefWord "@", PrimFetch
-DefWord "!", PrimStore
-DefWord "<", PrimLess
-DefWord ">", PrimGreater
-DefWord "==", PrimEq
-DefWord "!=", PrimNotEq
-DefWord "<=", PrimLessEq
-DefWord ">=", PrimGreaterEq
-DefImm "var", CompVariable
 DefImm "say", SayWord
+DefImm "print", SayWord
 DefImm "set", SetWord
-DefImm "keep", SetWord
+DefImm "keep", KeepWord
 DefImm "if", IfWord
 DefImm "otherwise", OtherwiseWord
 DefImm "end", EndWord
@@ -63,6 +40,25 @@ DefImm "stop", StopWord
 DefImm "skip", SkipWord
 DefImm "do", DoWord
 DefImm "return", ReturnWord
+DefImm "bye", ByeWord
+DefImm "kind", KindWord
+DefImm "check", CheckWord
+DefImm "is", IsWord
+DefImm "try", TryWord
+DefImm "later", LaterWord
+DefImm "else", HintElse
+DefImm "elif", HintElif
+DefImm "elseif", HintElif
+DefImm "then", HintThen
+DefImm "for", HintFor
+DefImm "while", HintWhile
+DefImm "function", HintFunction
+DefImm "def", HintFunction
+DefImm "func", HintFunction
+DefImm "fn", HintFunction
+DefImm "local", HintLocal
+DefImm "let", HintLocal
+DefImm "var", HintLocal
 Latest dq LastEntry
 
 section .text

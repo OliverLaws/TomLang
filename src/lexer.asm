@@ -59,6 +59,11 @@ NextToken:
 .NotSpace:
     cmp byte [r8], '#'
     jne .Start
+    lea r10, [r8 + 1]
+    cmp r10, r9
+    jae .Comment
+    cmp byte [r10], '['
+    je .Block
 .Comment:
     inc r8
     cmp r8, r9
@@ -66,6 +71,21 @@ NextToken:
     cmp byte [r8], 10
     jne .Comment
     jmp .Skip
+.Block:
+    add r8, 2
+.BlockLoop:
+    lea r10, [r8 + 1]
+    cmp r10, r9
+    jae .End
+    cmp byte [r8], ']'
+    jne .BlockNext
+    cmp byte [r10], '#'
+    jne .BlockNext
+    add r8, 2
+    jmp .Skip
+.BlockNext:
+    inc r8
+    jmp .BlockLoop
 .Start:
     mov r10, r8
     mov cl, [r8]
@@ -77,25 +97,116 @@ NextToken:
     jz .Symbol
 .Run:
     cmp r8, r9
-    jae .Done
+    jae .Decimal
     mov cl, [r8]
     call IsWordChar
     test eax, eax
-    jz .Done
+    jz .Decimal
     inc r8
     jmp .Run
+.Decimal:
+    mov cl, [r10]
+    cmp cl, '0'
+    jb .Done
+    cmp cl, '9'
+    ja .Done
+    lea r11, [r8 + 1]
+    cmp r11, r9
+    jae .Done
+    cmp byte [r8], '.'
+    jne .Done
+    mov cl, [r11]
+    cmp cl, '0'
+    jb .Done
+    cmp cl, '9'
+    ja .Done
+    mov r8, r11
+.Fraction:
+    cmp r8, r9
+    jae .Done
+    mov cl, [r8]
+    cmp cl, '0'
+    jb .Done
+    cmp cl, '9'
+    ja .Done
+    inc r8
+    jmp .Fraction
 .String:
+    xor r11d, r11d
+.StringLoop:
     cmp r8, r9
     jae .Done
     mov cl, [r8]
     inc r8
+    cmp cl, 92
+    je .Escape
+    cmp cl, '{'
+    jne .NotOpen
+    inc r11
+    jmp .StringLoop
+.NotOpen:
+    cmp cl, '}'
+    jne .NotClose
+    test r11, r11
+    jz .StringLoop
+    dec r11
+    jmp .StringLoop
+.NotClose:
     cmp cl, '"'
-    jne .String
-    jmp .Done
+    jne .StringLoop
+    test r11, r11
+    jz .Done
+.Nested:
+    cmp r8, r9
+    jae .Done
+    mov cl, [r8]
+    inc r8
+    cmp cl, 92
+    jne .NestedChar
+    inc r8
+    jmp .Nested
+.NestedChar:
+    cmp cl, '"'
+    jne .Nested
+    jmp .StringLoop
+.Escape:
+    cmp r8, r9
+    jae .Done
+    inc r8
+    jmp .StringLoop
 .Symbol:
     cmp r8, r9
     jae .Done
-    cmp byte [r8], '='
+    mov cl, [r8]
+    cmp cl, '='
+    je .Join
+    cmp cl, '>'
+    jne .NotArrow
+    cmp byte [r10], '='
+    je .Join
+.NotArrow:
+    cmp cl, [r10]
+    jne .Done
+    cmp cl, '/'
+    je .Join
+    cmp cl, '.'
+    je .Dots
+    cmp cl, '<'
+    je .Join
+    cmp cl, '>'
+    je .Join
+    cmp cl, '&'
+    je .Join
+    cmp cl, '|'
+    jne .Done
+.Join:
+    inc r8
+    jmp .Done
+.Dots:
+    inc r8
+    cmp r8, r9
+    jae .Done
+    cmp byte [r8], '.'
     jne .Done
     inc r8
 .Done:

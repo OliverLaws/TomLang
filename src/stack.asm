@@ -1,11 +1,15 @@
 global InitStack
 global DataStack
+global DataStackEnd
 global ReturnStack
+global ReturnStackEnd
 
 section .bss
-StackGuard  resq 4
-DataStack   resq 1024
-ReturnStack resq 1024
+StackGuard     resq 4
+DataStack      resq 65536
+DataStackEnd   resq 4
+ReturnStack    resq 65536
+ReturnStackEnd resq 4
 
 section .text
 InitStack:
