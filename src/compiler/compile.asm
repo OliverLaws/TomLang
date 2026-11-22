@@ -32,10 +32,10 @@ CodeBuf   resq 1048576
 CodeEnd   resq 64
 DictSpace resq 1048576
 DictEnd   resq 64
-InstSpace resb InstRegion * 8
+InstSpace resb InstRegion * 10
 InstEnd   resq 64
-InstSaveHere resq 8
-InstSaveEnd  resq 8
+InstSaveHere resq 10
+InstSaveEnd  resq 10
 DataSpace resq 2097152
 DataEnd   resq 64
 Here      resq 1
@@ -50,7 +50,7 @@ DictStartPtr dq DictSpace
 DictEndPtr   dq DictEnd
 InstHereTab:
 %assign i 0
-%rep 8
+%rep 10
     dq InstSpace + i * InstRegion
 %assign i i + 1
 %endrep

@@ -13,6 +13,7 @@ global SetMainFile
 global SourceStart
 global SourceEnd
 global CurFile
+global TryForward
 
 extern InitIO
 extern PrintString
@@ -76,6 +77,14 @@ extern PermAlloc
 extern StackBase
 extern InFn
 extern InstanceDepth
+extern PreScanActive
+extern PreScanFail
+extern EmitGlobalInits
+extern PrimBranch
+extern NestDepth
+extern NestHeaderDone
+extern NestAbort
+extern PreDeclare
 extern NamePrefixPtr
 extern NamePrefixLen
 extern CopyString
@@ -131,6 +140,9 @@ ExeDirLen   resq 1
 UseStack    resq 16 * 16
 PrefixBuf   resb 256
 CurFile     resq 1
+BareUse     resq 1
+BarePtr     resq 1
+BareLen     resq 1
 FileCount   resq 1
 FilePath    resq 2 * 64
 PathTemp    resb 2048
@@ -185,6 +197,9 @@ Start:
     call SetInput
     lea rax, [rel CodeBuf]
     mov [rel Here], rax
+    CompilePrim PrimBranch
+    lea rcx, [rel CodeBuf + 16]
+    call Compile
     jmp Tokens
 
 Repl:
@@ -287,6 +302,22 @@ Tokens:
     lea rbp, [rel ReturnStack]
     mov r13, rbp
     CompilePrim LineDone
+    cmp qword [rel FileMode], 0
+    je .NoInits
+    mov rax, [rel Here]
+    push rax
+    push rax
+    call EmitGlobalInits
+    pop rax
+    pop rax
+    cmp rax, [rel Here]
+    je .NoInits
+    lea rcx, [rel CodeBuf + 8]
+    mov [rcx], rax
+    CompilePrim PrimBranch
+    lea rcx, [rel CodeBuf + 16]
+    call Compile
+.NoInits:
     lea r14, [rel CodeBuf]
     NEXT
 
@@ -434,18 +465,35 @@ UseWord:
     cmp qword [rel OpenBlocks], 0
     jne .Where
     call Advance
+    mov qword [rel BareUse], 0
     mov rcx, [rel TokPtr]
     mov rdx, [rel TokLen]
+    test rdx, rdx
+    jz .BadName
+    cmp byte [rcx], 34
+    je .Quoted
+    cmp rdx, 100
+    ja .BadName
+    movzx eax, byte [rcx]
+    or al, 32
+    cmp al, 'a'
+    jb .BadName
+    cmp al, 'z'
+    ja .BadName
+    mov qword [rel BareUse], 1
+    mov [rel BarePtr], rcx
+    mov [rel BareLen], rdx
+    jmp .Named
+.Quoted:
     cmp rdx, 3
     jb .BadName
-    cmp byte [rcx], 34
-    jne .BadName
     cmp byte [rcx + rdx - 1], 34
     jne .BadName
     cmp rdx, 800
     ja .BadName
     inc rcx
     sub rdx, 2
+.Named:
     mov [rel ErrTokPtr], rcx
     mov [rel ErrTokLen], rdx
     call ResolveUse
@@ -456,6 +504,12 @@ UseWord:
     push rdx
     call NormalizePath
     call ReadAlias
+    cmp qword [rel BareUse], 0
+    je .AliasDone
+    cmp qword [rel AliasLen], 0
+    jne .AliasDone
+    call BareAlias
+.AliasDone:
     call AlreadyUsed
     test eax, eax
     jnz .Skip
@@ -519,6 +573,95 @@ UseWord:
     lea rcx, [rel ErrUseDeep]
     mov edx, ErrUseDeepLen
     jmp Abort
+
+TryForward:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push rsi
+    push rdi
+    sub rsp, 8
+    mov rsi, rcx
+    mov rdi, rdx
+    call GetInput
+    mov r12, rax
+    mov r13, rdx
+    mov rax, [rel SourceEnd]
+    cmp r13, rax
+    jne .Out
+    xor ebx, ebx
+.Loop:
+    call NextToken
+    test rdx, rdx
+    jz .Out
+    cmp rax, [rel SourceStart]
+    je .Col0
+    movzx ecx, byte [rax - 1]
+    cmp ecx, 10
+    je .Col0
+    cmp ecx, 13
+    jne .Loop
+.Col0:
+    cmp rdx, 3
+    je .Three
+    cmp rdx, 2
+    jne .Loop
+    cmp word [rax], 'do'
+    jne .Loop
+    test ebx, ebx
+    jnz .Loop
+    mov r14, rax
+    call NextToken
+    cmp rdx, rdi
+    jne .Loop
+    xor ecx, ecx
+.Cmp:
+    cmp rcx, rdi
+    jae .Match
+    mov r8b, [rax + rcx]
+    cmp r8b, [rsi + rcx]
+    jne .Loop
+    inc rcx
+    jmp .Cmp
+.Match:
+    cmp byte [rax + rdi], '('
+    jne .Loop
+    lea rcx, [r14 + 2]
+    mov rdx, r13
+    sub rdx, rcx
+    call SetInput
+    mov rcx, r14
+    mov edx, 2
+    call PreDeclare
+    jmp .Out
+.Three:
+    movzx ecx, word [rax]
+    movzx r8d, byte [rax + 2]
+    shl r8d, 16
+    or ecx, r8d
+    cmp ecx, 'dll'
+    je .Dll
+    cmp ecx, 'end'
+    jne .Loop
+    xor ebx, ebx
+    jmp .Loop
+.Dll:
+    mov ebx, 1
+    jmp .Loop
+.Out:
+    mov rcx, r12
+    mov rdx, r13
+    sub rdx, r12
+    call SetInput
+    add rsp, 8
+    pop rdi
+    pop rsi
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
 
 EndUse:
     dec qword [rel UseDepth]
@@ -688,12 +831,15 @@ ReadAlias:
     lea rcx, [rel PrefixBuf]
     inc rdx
     push rdx
+    push qword [rel NamePrefixLen]
     mov qword [rel NamePrefixLen], 0
     call CopyString
+    pop qword [rel NamePrefixLen]
     pop rdx
     mov [rel AliasPtr], rax
     mov [rel AliasLen], rdx
     ret
+
 .None:
     mov rcx, [rel TokPtr]
     jmp Unread
@@ -701,6 +847,30 @@ ReadAlias:
     lea rcx, [rel ErrAlias]
     mov edx, ErrAliasLen
     jmp Abort
+
+BareAlias:
+    push rsi
+    push rdi
+    mov rsi, [rel BarePtr]
+    mov rdx, [rel BareLen]
+    lea rdi, [rel PrefixBuf]
+    mov rcx, rdx
+    rep movsb
+    mov byte [rdi], '.'
+    pop rdi
+    pop rsi
+    lea rcx, [rel PrefixBuf]
+    mov rdx, [rel BareLen]
+    inc rdx
+    push rdx
+    push qword [rel NamePrefixLen]
+    mov qword [rel NamePrefixLen], 0
+    call CopyString
+    pop qword [rel NamePrefixLen]
+    pop rdx
+    mov [rel AliasPtr], rax
+    mov [rel AliasLen], rdx
+    ret
 
 AlreadyUsed:
     xor eax, eax
@@ -1206,6 +1376,13 @@ Recover:
     jmp Tokens
 .Fn:
     mov r8d, 1
+    cmp qword [rel NestDepth], 0
+    je .Block
+    xor r8d, r8d
+    cmp qword [rel NestHeaderDone], 0
+    jne .Block
+    call NestAbort
+    xor r8d, r8d
 .Block:
     DPush 0
     DPush 0
@@ -1276,6 +1453,8 @@ ErrorLine:
     ret
 
 Abort:
+    cmp qword [rel PreScanActive], 0
+    jne PreScanFail
     mov rsp, [rel ReplRsp]
     mov [rel ErrMsg], rcx
     mov [rel ErrLen], rdx

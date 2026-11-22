@@ -24,6 +24,7 @@ ParsePrimary:
     IfTok "text", .ToText
     IfTok "charCode", .Code
     IfTok "charFrom", .Char
+    IfTok ".", .DotNumber
     mov rax, [rel TokPtr]
     cmp byte [rax], '"'
     je .String
@@ -43,6 +44,23 @@ ParsePrimary:
     inc r8
     jmp .FindDot
 .Decimal:
+    call ParseDecimalText
+    mov rbx, rax
+    CompileNum rbx
+    SetType TDec
+    jmp Advance
+.DotNumber:
+    mov rax, [rel TokPtr]
+    movzx ecx, byte [rax + 1]
+    sub ecx, '0'
+    cmp ecx, 9
+    ja .Missing
+    push rax
+    call Advance
+    pop rcx
+    mov rdx, [rel TokPtr]
+    add rdx, [rel TokLen]
+    sub rdx, rcx
     call ParseDecimalText
     mov rbx, rax
     CompileNum rbx
@@ -165,6 +183,9 @@ ParsePrimary:
     push rax
     call Advance
     IfTok "(", .FuncCall
+    mov rax, [rsp]
+    test qword [rax - SigFlags], 4
+    jnz .NestValue
     CompilePrim PrimLit
     mov rcx, [rsp]
     call Compile
@@ -361,6 +382,11 @@ ParsePrimary:
     call Unread
     call Advance
     call Advance
+    mov rax, [rsp + 640]
+    test qword [rax - SigFlags], 4
+    jz .NoLink
+    call EmitLink
+.NoLink:
     CompilePrim PrimCall
     mov rcx, [rsp + 640]
     call Compile
@@ -368,12 +394,18 @@ ParsePrimary:
     add rsp, 928
     mov rax, [rcx - 8]
     mov qword [rel VoidCall], 0
+    test qword [rcx - SigFlags], 2
+    jnz .FuncLater
     test rax, rax
     jnz .FuncType
     mov qword [rel VoidCall], 1
     mov eax, TNum
 .FuncType:
     mov [rel ExprType], rax
+    ret
+.FuncLater:
+    mov qword [rel VoidCall], 2
+    mov qword [rel ExprType], TNone
     ret
 .P1Comma:
     call Advance
@@ -635,7 +667,26 @@ ParsePrimary:
     Fail ErrString
 .Missing:
     Fail ErrExpect
+.NestValue:
+    Fail ErrNestValue
 .Unknown:
+    cmp qword [rel PreScanActive], 0
+    jne .NoForward
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    cmp byte [rcx + rdx], '('
+    jne .NoForward
+    call TryForward
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    call FindWord
+    test rax, rax
+    jz .NoForward
+    cmp rdx, 4
+    je .Func
+    cmp rdx, 7
+    je .Generic
+.NoForward:
     call CaptureName
     test rax, rax
     jnz .Var

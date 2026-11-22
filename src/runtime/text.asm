@@ -2,16 +2,24 @@
 
 global PrimSayText
 extern Alloc
+extern MakeTextFrom
 global PrimConcat
 global PrimToText
 global PrimToNumber
 global PrimTextEq
+global PrimTextCompare
 global PrimAsk
 global PrimRandom
 global PrimMakeList
 global PrimIndex
 global PrimSetIndex
 global PrimListAdd
+global PrimTextSlice
+global PrimListSlice
+global PrimListInsert
+global PrimListRemove
+global PrimListPop
+global PrimListCopy
 global PrimLength
 extern PrintString
 extern PrintNewLine
@@ -24,6 +32,10 @@ ErrNotNumber db "that text isn't a whole number"
 ErrNotNumberLen equ $ - ErrNotNumber
 ErrIndex     db "list index out of range"
 ErrIndexLen  equ $ - ErrIndex
+ErrEmptyList db "can't take from an empty list"
+ErrEmptyListLen equ $ - ErrEmptyList
+ErrTextRange db "text index out of range"
+ErrTextRangeLen equ $ - ErrTextRange
 
 section .bss
 RandState resq 1
@@ -166,6 +178,39 @@ PrimToNumber:
     lea rcx, [rel ErrNotNumber]
     mov edx, ErrNotNumberLen
     jmp Abort
+
+PrimTextCompare:
+    DPop rdi
+    DPop rsi
+    mov rcx, [rsi]
+    mov r9, [rdi]
+    cmp rcx, r9
+    cmova rcx, r9
+    xor edx, edx
+.Loop:
+    cmp rdx, rcx
+    jae .Prefix
+    mov r8b, [rsi + 8 + rdx]
+    cmp r8b, [rdi + 8 + rdx]
+    jb .Less
+    ja .More
+    inc rdx
+    jmp .Loop
+.Prefix:
+    mov rax, [rsi]
+    cmp rax, r9
+    jb .Less
+    ja .More
+    xor eax, eax
+    jmp .Push
+.Less:
+    mov rax, -1
+    jmp .Push
+.More:
+    mov eax, 1
+.Push:
+    DPush rax
+    NEXT
 
 PrimTextEq:
     DPop rdi
@@ -321,6 +366,186 @@ PrimListAdd:
     mov [rcx + rax * 8], rsi
     inc qword [rdi]
     NEXT
+
+PrimListCopy:
+    mov ecx, 24
+    call Alloc
+    mov qword [rax], 0
+    mov qword [rax + 16], 0
+    push rax
+    push rax
+    mov rdx, [r15 - 8]
+    mov rcx, [rdx]
+    cmp rcx, 4
+    jae .Cap
+    mov ecx, 4
+.Cap:
+    mov [rax + 8], rcx
+    shl rcx, 3
+    call Alloc
+    pop rdi
+    pop rdi
+    mov [rdi + 16], rax
+    mov rsi, [r15 - 8]
+    mov r8, [rsi]
+    mov [rdi], r8
+    mov rcx, [rsi + 16]
+    mov rdx, rax
+    shl r8, 3
+    call MemCopy
+    mov [r15 - 8], rdi
+    NEXT
+
+PrimListPop:
+    DPop rax
+    mov rcx, [rax]
+    test rcx, rcx
+    jz EmptyList
+    dec rcx
+    mov [rax], rcx
+    mov rdx, [rax + 16]
+    mov rax, [rdx + rcx * 8]
+    mov qword [rdx + rcx * 8], 0
+    DPush rax
+    NEXT
+
+EmptyList:
+    lea rcx, [rel ErrEmptyList]
+    mov edx, ErrEmptyListLen
+    jmp Abort
+
+PrimListRemove:
+    DPop rbx
+    DPop rax
+    cmp rbx, 1
+    jl IndexError
+    cmp rbx, [rax]
+    jg IndexError
+    mov rdx, [rax + 16]
+    mov rsi, [rdx + rbx * 8 - 8]
+    mov rcx, [rax]
+.Shift:
+    cmp rbx, rcx
+    jae .Done
+    mov r8, [rdx + rbx * 8]
+    mov [rdx + rbx * 8 - 8], r8
+    inc rbx
+    jmp .Shift
+.Done:
+    dec rcx
+    mov [rax], rcx
+    mov qword [rdx + rcx * 8], 0
+    DPush rsi
+    NEXT
+
+PrimListInsert:
+    DPop rsi
+    DPop rbx
+    DPop rdi
+    cmp rbx, 1
+    jl IndexError
+    mov rax, [rdi]
+    inc rax
+    cmp rbx, rax
+    jg IndexError
+    mov rax, [rdi]
+    cmp rax, [rdi + 8]
+    jb .Room
+    mov rcx, [rdi + 8]
+    shl rcx, 4
+    call Alloc
+    push rax
+    push rax
+    mov rcx, [rdi + 16]
+    mov rdx, rax
+    mov r8, [rdi]
+    shl r8, 3
+    call MemCopy
+    pop rax
+    pop rax
+    mov [rdi + 16], rax
+    shl qword [rdi + 8], 1
+.Room:
+    mov rcx, [rdi]
+    mov rdx, [rdi + 16]
+.Up:
+    cmp rcx, rbx
+    jl .Put
+    mov r8, [rdx + rcx * 8 - 8]
+    mov [rdx + rcx * 8], r8
+    dec rcx
+    jmp .Up
+.Put:
+    mov [rdx + rbx * 8 - 8], rsi
+    inc qword [rdi]
+    NEXT
+
+PrimListSlice:
+    DPop rsi
+    DPop rbx
+    mov rax, [r15 - 8]
+    cmp rbx, 1
+    jl IndexError
+    cmp rsi, [rax]
+    jg IndexError
+    mov rdi, rsi
+    sub rdi, rbx
+    inc rdi
+    jg .Sized
+    xor edi, edi
+.Sized:
+    mov ecx, 24
+    call Alloc
+    mov qword [rax], 0
+    mov qword [rax + 16], 0
+    push rax
+    push rax
+    mov rcx, rdi
+    cmp rcx, 4
+    jae .Cap
+    mov ecx, 4
+.Cap:
+    mov [rax + 8], rcx
+    shl rcx, 3
+    call Alloc
+    pop rdx
+    pop rdx
+    mov [rdx + 16], rax
+    mov [rdx], rdi
+    mov rsi, [r15 - 8]
+    mov rcx, [rsi + 16]
+    lea rcx, [rcx + rbx * 8 - 8]
+    mov r8, rdi
+    shl r8, 3
+    mov rsi, rdx
+    mov rdx, rax
+    call MemCopy
+    mov [r15 - 8], rsi
+    NEXT
+
+PrimTextSlice:
+    DPop rsi
+    DPop rbx
+    mov rax, [r15 - 8]
+    cmp rbx, 1
+    jl TextSliceError
+    cmp rsi, [rax]
+    jg TextSliceError
+    mov rdx, rsi
+    sub rdx, rbx
+    inc rdx
+    jg .Sized
+    xor edx, edx
+.Sized:
+    lea rcx, [rax + 7 + rbx]
+    call MakeTextFrom
+    mov [r15 - 8], rax
+    NEXT
+
+TextSliceError:
+    lea rcx, [rel ErrTextRange]
+    mov edx, ErrTextRangeLen
+    jmp Abort
 
 PrimLength:
     DPop rax

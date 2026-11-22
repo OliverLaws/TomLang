@@ -30,6 +30,7 @@ global SkipWord
 global DoWord
 global ReturnWord
 global ByeWord
+global FailWord
 global HintElse
 global HintElif
 global HintThen
@@ -85,6 +86,10 @@ extern PrimLocalSet
 extern PrimBranch
 extern PrimBranch0
 extern PrimBye
+extern PrimLinkGet
+extern PrimLinkSet
+extern PrimPushFrame
+extern PrimFail
 extern PrimLess
 extern PrimGreater
 extern PrimEq
@@ -98,12 +103,19 @@ extern PrimConcat
 extern PrimToText
 extern PrimToNumber
 extern PrimTextEq
+extern PrimTextCompare
 extern PrimAsk
 extern PrimRandom
 extern PrimMakeList
 extern PrimIndex
 extern PrimSetIndex
 extern PrimListAdd
+extern PrimTextSlice
+extern PrimListSlice
+extern PrimListInsert
+extern PrimListRemove
+extern PrimListPop
+extern PrimListCopy
 extern PrimLength
 extern TypeKind
 extern ListOf
@@ -119,39 +131,39 @@ extern PrimMakeClosure
 extern PrimTry
 extern PrimTryEnd
 extern PrimLastError
-extern NextToken
 extern DictHere
+extern CurFile
+extern TryForward
+extern PrimMissingFn
 extern EnterInstanceSpace
 extern LeaveInstanceSpace
-extern PrimLessEq
 extern TypeTable
 global KindWord
 global DllWord
 global InstanceDepth
+global PreScanActive
+global PreScanFail
+global EmitGlobalInits
+global NestDepth
+global NestHeaderDone
+global NestAbort
+global PreDeclare
 extern VarTypeOf
 extern SaveMain
 extern RestoreMain
 extern SetMainFile
 extern SourceStart
 extern SourceEnd
-extern CurFile
 extern SavedHere
-extern FnEntry
 extern RecordLine
-extern BeginDef
-extern EndDef
-extern GetInput
-extern SetInput
 extern SysLoadLib
 extern SysGetProc
 extern PrimFfiCall
 extern CreateEntry
-extern Latest
 global CheckWord
 global IsWord
 global TryWord
 global LaterWord
-extern CreateVar
 extern ParseDecimalText
 extern PrimDup
 extern PrimDup2
@@ -311,6 +323,10 @@ __SECT__
 
 %include "parser/messages.inc"
 
+MaxForward equ 1024
+NestRegion equ 9
+ForwardRegion equ 8
+
 section .bss
 ParserState:
 AllowTypeVars resq 1
@@ -389,8 +405,40 @@ LocalPtr     resq MaxLocals
 LocalLen     resq MaxLocals
 LocalType    resq MaxLocals
 LocalConst   resq MaxLocals
+LocalInit    resq MaxLocals
+FnInitCell   resq 1
+NestListCount resq 1
+NestList resq 64
+EachIdxPtr resq 1
+EachIdxLen resq 1
+EachMapVar resq 1
+EachMapType resq 1
 ParserStateEnd:
 GenericCount resq 1
+InitVarCount resq 1
+InitVars resq 4096
+NestDepth resq 1
+NestInInstance resq 1
+NestPending resq 1
+NestHeaderDone resq 1
+NestLinkOff resq 1
+NestEntry resq 1
+NestVars resq 4
+alignb 16
+NestSave resb (ParserStateEnd - ParserState)
+MultiCount resq 1
+MultiLast resq 1
+MultiPtr resq 10
+MultiLen resq 10
+MultiBuf resb 256
+ForwardMode resq 1
+PreScanActive resq 1
+PreScanRsp resq 1
+ForwardCount resq 1
+ForwardTable resq 3 * MaxForward
+PreScanVars resq 8
+alignb 16
+PreScanSave resb (ParserStateEnd - ParserState)
 GenericTable resq 2 * 256
 InstanceDepth resq 1
 SubstFail resq 1

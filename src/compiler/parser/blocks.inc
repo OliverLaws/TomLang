@@ -99,6 +99,9 @@ EndWord:
     cmp qword [r15 - 16], 0
     je .Pop
     call DropFn
+    cmp qword [rel NestDepth], 0
+    je .Pop
+    mov qword [rel NestPending], 1
     jmp .Pop
 .Try:
     mov rcx, [r15 - 32]
@@ -169,15 +172,24 @@ EndWord:
 .NoReturn:
     CompilePrim PrimNoReturn
 .FnFinish:
+    call EmitLocalInits
     mov rax, [rel FnFrameSlot]
     mov rcx, [rel LocalCount]
     mov [rax], rcx
     call EndDef
     mov qword [rel InFn], 0
     mov qword [rel LocalCount], 0
+    cmp qword [rel NestDepth], 0
+    jne .NestDone
+    call HideNested
+    jmp .Pop
+.NestDone:
+    mov qword [rel NestPending], 1
 .Pop:
     sub r15, 40
     dec qword [rel OpenBlocks]
+    cmp qword [rel NestPending], 0
+    jne NestEnd
     ret
 .Bad:
     Fail ErrEnd
@@ -188,6 +200,9 @@ RepeatWord:
     IfTok "while", .While
     IfTok "until", .Until
     IfTok "each", .Each
+    call PeekFrom
+    test eax, eax
+    jnz RepeatFrom
     call NewHidden
     push rax
     call ParseExpr
@@ -256,9 +271,25 @@ RepeatWord:
     call IsNameStart
     test eax, eax
     jz .BadEach
+    mov qword [rel EachIdxLen], 0
     push qword [rel TokPtr]
     push qword [rel TokLen]
     call Advance
+    IfTok ",", .EachPair
+    jmp .EachIn
+.EachPair:
+    call Advance
+    call IsNameStart
+    test eax, eax
+    jz .BadEach
+    pop rax
+    pop rcx
+    mov [rel EachIdxPtr], rcx
+    mov [rel EachIdxLen], rax
+    push qword [rel TokPtr]
+    push qword [rel TokLen]
+    call Advance
+.EachIn:
     Expect "in", ErrEach
     call Advance
     call ParseBits
@@ -269,11 +300,34 @@ RepeatWord:
     je .EachList
     cmp rax, KMap
     jne TypeError
+    mov qword [rel EachMapVar], 0
+    cmp qword [rel EachIdxLen], 0
+    je .MapKeys
+    mov rcx, [rel ExprType]
+    call ElemOf
+    mov [rel EachMapType], rax
+    CompilePrim PrimDup
+    call NewHidden
+    mov [rel EachMapVar], rax
+    mov rcx, rax
+    call EmitStore
+    mov rax, [rel EachIdxPtr]
+    mov rcx, [rsp + 8]
+    mov [rel EachIdxPtr], rcx
+    mov [rsp + 8], rax
+    mov rax, [rel EachIdxLen]
+    mov rcx, [rsp]
+    mov [rel EachIdxLen], rcx
+    mov [rsp], rax
+.MapKeys:
     CompilePrim PrimMapKeys
     mov ecx, TText
     call ListOf
     mov [rel ExprType], rax
+    jmp .EachList2
 .EachList:
+    mov qword [rel EachMapVar], 0
+.EachList2:
     mov rcx, [rel ExprType]
     call ElemOf
     push rax
@@ -324,6 +378,47 @@ RepeatWord:
     CompilePrim PrimIndex
     mov rcx, [rsp + 16]
     call EmitStore
+    cmp qword [rel EachIdxLen], 0
+    je .NoIdx
+    mov rcx, [rel EachIdxPtr]
+    mov rdx, [rel EachIdxLen]
+    call ResolveLoopVar
+    push rax
+    mov rbx, TNum
+    cmp qword [rel EachMapVar], 0
+    je .IdxKind
+    mov rbx, [rel EachMapType]
+.IdxKind:
+    mov rcx, rax
+    call TypeOf
+    test rax, rax
+    jz .IdxSetType
+    cmp rax, rbx
+    jne TypeError
+    jmp .IdxTyped
+.IdxSetType:
+    mov rcx, [rsp]
+    mov rdx, rbx
+    call SetTypeOf
+.IdxTyped:
+    cmp qword [rel EachMapVar], 0
+    jne .MapValue
+    mov rcx, [rsp + 32]
+    call EmitLoad
+    CompileNum 1
+    CompilePrim PrimAdd
+    pop rcx
+    call EmitStore
+    jmp .NoIdx
+.MapValue:
+    mov rcx, [rel EachMapVar]
+    call EmitLoad
+    mov rcx, [rsp + 24]
+    call EmitLoad
+    CompilePrim PrimMapGet
+    pop rcx
+    call EmitStore
+.NoIdx:
     pop rax
     pop rdx
     pop rcx
@@ -338,6 +433,8 @@ RepeatWord:
     inc qword [rel OpenBlocks]
     jmp Pushback
 .EachRange:
+    cmp qword [rel EachIdxLen], 0
+    jne .BadEach
     NeedType TNum
     call Advance
     call ParseBits
@@ -461,3 +558,148 @@ SkipWord:
     mov [rax], rdx
     mov [r11 + 24], rax
     ret
+
+PeekFrom:
+    call IsNameStart
+    test eax, eax
+    jz .No
+    mov rcx, [rel TokPtr]
+    add rcx, [rel TokLen]
+.Skip:
+    movzx eax, byte [rcx]
+    cmp eax, ' '
+    je .Next
+    cmp eax, 9
+    je .Next
+    cmp dword [rcx], 'from'
+    jne .No
+    movzx eax, byte [rcx + 4]
+    cmp eax, ' '
+    je .Yes
+    cmp eax, 9
+    jne .No
+.Yes:
+    mov eax, 1
+    ret
+.Next:
+    inc rcx
+    jmp .Skip
+.No:
+    xor eax, eax
+    ret
+
+RepeatFrom:
+    push qword [rel TokPtr]
+    push qword [rel TokLen]
+    call Advance
+    call Advance
+    call ParseExpr
+    NeedType TNum
+    mov rcx, [rsp + 8]
+    mov rdx, [rsp]
+    call ResolveLoopVar
+    mov [rsp + 8], rax
+    mov rcx, rax
+    call TypeOf
+    test rax, rax
+    jz .SetType
+    cmp rax, TNum
+    jne TypeError
+    jmp .Typed
+.SetType:
+    mov rcx, [rsp + 8]
+    mov edx, TNum
+    call SetTypeOf
+.Typed:
+    mov rcx, [rsp + 8]
+    call EmitStore
+    Expect "to", ErrFromTo
+    call Advance
+    call ParseExpr
+    NeedType TNum
+    call NewHidden
+    mov [rsp], rax
+    mov rcx, rax
+    call EmitStore
+    IfTok "by", .Step
+    mov rax, [rel Here]
+    push rax
+    mov rcx, [rsp + 16]
+    call EmitLoad
+    mov rcx, [rsp + 8]
+    call EmitLoad
+    CompilePrim PrimLessEq
+    lea rcx, [rel PrimBranch0]
+    call EmitJump
+    pop rdx
+    mov rbx, [rsp + 8]
+    add rsp, 16
+    or rbx, 1
+    DPush rdx
+    DPush rax
+    DPush rbx
+    DPush 0
+    DPush TagLoop
+    inc qword [rel OpenBlocks]
+    jmp Pushback
+.Step:
+    call Advance
+    call ParseExpr
+    NeedType TNum
+    call NewHidden
+    push rax
+    mov rcx, rax
+    call EmitStore
+    mov rcx, [rsp + 16]
+    call EmitLoad
+    mov rcx, [rsp]
+    call EmitLoad
+    CompilePrim PrimSub
+    mov rcx, [rsp + 16]
+    call EmitStore
+    mov rax, [rel Here]
+    push rax
+    mov rcx, [rsp + 24]
+    call EmitLoad
+    mov rcx, [rsp + 8]
+    call EmitLoad
+    CompilePrim PrimAdd
+    mov rcx, [rsp + 24]
+    call EmitStore
+    mov rcx, [rsp + 8]
+    call EmitLoad
+    CompileNum 0
+    CompilePrim PrimGreater
+    lea rcx, [rel PrimBranch0]
+    call EmitJump
+    push rax
+    mov rcx, [rsp + 32]
+    call EmitLoad
+    mov rcx, [rsp + 24]
+    call EmitLoad
+    CompilePrim PrimLessEq
+    lea rcx, [rel PrimBranch]
+    call EmitJump
+    pop rcx
+    push rax
+    mov rdx, [rel Here]
+    mov [rcx], rdx
+    mov rcx, [rsp + 32]
+    call EmitLoad
+    mov rcx, [rsp + 24]
+    call EmitLoad
+    CompilePrim PrimGreaterEq
+    pop rcx
+    mov rdx, [rel Here]
+    mov [rcx], rdx
+    lea rcx, [rel PrimBranch0]
+    call EmitJump
+    pop rdx
+    add rsp, 24
+    DPush rdx
+    DPush rax
+    DPush 0
+    DPush 0
+    DPush TagLoop
+    inc qword [rel OpenBlocks]
+    jmp Pushback

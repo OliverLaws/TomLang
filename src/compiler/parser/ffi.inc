@@ -76,6 +76,71 @@ ZeroName:
 .Long:
     Fail ErrFfiLoad
 
+DllAlias:
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    lea r8, [rcx + rdx]
+    xor r9d, r9d
+.Scan:
+    movzx eax, byte [r8]
+    cmp eax, 10
+    je .None
+    cmp eax, 13
+    je .None
+    test eax, eax
+    jz .None
+    cmp eax, '('
+    jne .NotOpen
+    inc r9
+.NotOpen:
+    cmp eax, ')'
+    jne .NotClose
+    dec r9
+.NotClose:
+    test r9, r9
+    jnz .Next
+    cmp eax, ' '
+    jne .Next
+    cmp word [r8 + 1], 'as'
+    jne .Next
+    cmp byte [r8 + 3], ' '
+    jne .Next
+    lea r10, [r8 + 4]
+.Spaces:
+    cmp byte [r10], ' '
+    jne .Quote
+    inc r10
+    jmp .Spaces
+.Quote:
+    cmp byte [r10], 34
+    jne .Next
+    inc r10
+    mov r11, r10
+.Find:
+    movzx eax, byte [r11]
+    cmp eax, 34
+    je .Found
+    cmp eax, 10
+    je .None
+    test eax, eax
+    jz .None
+    inc r11
+    jmp .Find
+.Found:
+    mov rcx, r10
+    mov rdx, r11
+    sub rdx, r10
+    test rdx, rdx
+    jz .None
+    ret
+.Next:
+    inc r8
+    jmp .Scan
+.None:
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    ret
+
 DllWord:
     cmp qword [rel InFn], 0
     jne .Where
@@ -107,8 +172,7 @@ DllWord:
     call IsNameStart
     test eax, eax
     jz .BadFn
-    mov rcx, [rel TokPtr]
-    mov rdx, [rel TokLen]
+    call DllAlias
     call ZeroName
     mov rdx, rax
     mov rcx, [rel FfiLib]
@@ -200,6 +264,12 @@ DllWord:
     mov [rel FfiRet], r8
     call Advance
 .Emit:
+    IfTok "as", .Alias
+    jmp .EmitCall
+.Alias:
+    call Advance
+    call Advance
+.EmitCall:
     CompilePrim PrimFfiCall
     mov rcx, [rel FfiProc]
     call Compile

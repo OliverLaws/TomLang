@@ -22,6 +22,11 @@ global PrimSwap
 global PrimPrint
 global PrimSayStr
 global PrimBye
+global PrimFail
+global PrimPushFrame
+global PrimLinkGet
+global PrimLinkSet
+global PrimMissingFn
 global PrimCall
 global PrimExit
 global PrimCallValue
@@ -73,6 +78,8 @@ extern ReturnStackEnd
 section .data
 ErrDivZero     db "can't divide by 0"
 ErrDivZeroLen  equ $ - ErrDivZero
+ErrMissingFn   db "this function was never finished (its definition has a mistake)"
+ErrMissingFnLen equ $ - ErrMissingFn
 align 8
 NoError dq 0
 ErrOverflow    db "too much recursion (the stack is full)"
@@ -184,6 +191,17 @@ PrimMod:
 .MinusOne:
     DPush 0
     NEXT
+
+PrimMissingFn:
+    lea rcx, [rel ErrMissingFn]
+    mov edx, ErrMissingFnLen
+    jmp Abort
+
+PrimFail:
+    mov rax, [r15 - 8]
+    lea rcx, [rax + 8]
+    mov rdx, [rax]
+    jmp Abort
 
 DivZero:
     lea rcx, [rel ErrDivZero]
@@ -405,6 +423,28 @@ PrimReturn:
     mov rbp, r13
     RPop r13
     RPop r14
+    NEXT
+
+PrimPushFrame:
+    DPush r13
+    NEXT
+
+PrimLinkGet:
+    mov rax, [r14]
+    mov rcx, [r14 + 8]
+    add r14, 16
+    mov rax, [r13 + rax]
+    mov rax, [rax + rcx]
+    DPush rax
+    NEXT
+
+PrimLinkSet:
+    mov rax, [r14]
+    mov rcx, [r14 + 8]
+    add r14, 16
+    mov rax, [r13 + rax]
+    DPop rbx
+    mov [rax + rcx], rbx
     NEXT
 
 PrimLocalGet:

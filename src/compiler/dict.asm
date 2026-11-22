@@ -14,6 +14,7 @@ extern SkipWord
 extern DoWord
 extern ReturnWord
 extern ByeWord
+extern FailWord
 extern NamePrefixLen
 extern NamePrefixPtr
 extern HintElse
@@ -45,6 +46,7 @@ DefImm "skip", SkipWord
 DefImm "do", DoWord
 DefImm "return", ReturnWord
 DefImm "bye", ByeWord
+DefImm "fail", FailWord
 DefImm "kind", KindWord
 DefImm "check", CheckWord
 DefImm "is", IsWord

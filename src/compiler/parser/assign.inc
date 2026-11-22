@@ -17,7 +17,11 @@ StmtExpr:
     IfTok "/=", .Assign
     pop rcx
     cmp qword [rel ExprType], TNone
-    je .Done
+    jne .HasValue
+    cmp qword [rel VoidCall], 2
+    je .Drop
+    jmp .Done
+.HasValue:
     test rcx, rcx
     jz .Drop
     cmp qword [rel FileMode], 0
@@ -53,6 +57,14 @@ SayWord:
     call Advance
     call ParseExpr
     call EmitSay
+    jmp Pushback
+
+FailWord:
+    call Advance
+    call ParseExpr
+    mov rax, [rel ExprType]
+    call ToTextRaw
+    CompilePrim PrimFail
     jmp Pushback
 
 ByeWord:
@@ -163,6 +175,8 @@ SetWord:
     call IsReserved
     test eax, eax
     jnz .BadName
+    cmp qword [rel InFn], 0
+    jne .NameOk
     mov rcx, [rel TokPtr]
     mov rdx, [rel TokLen]
     call FindWord
@@ -252,6 +266,11 @@ AssignTail:
     mov rcx, [rsp]
     call SetTypeOf
     call Advance
+    cmp qword [rel TokLen], 0
+    je .DefaultValue
+    call SameLine
+    test eax, eax
+    jz .DefaultValue
 .Op:
     IfTok "=", .Assign
     IfTok "+=", .AddAssign
@@ -262,6 +281,46 @@ AssignTail:
     Fail ErrSet
 .DoubleEq:
     Fail ErrDoubleEq
+.DefaultValue:
+    mov rcx, [rsp]
+    call TypeOf
+    cmp rax, TNum
+    je .DefaultZero
+    cmp rax, TBool
+    je .DefaultZero
+    cmp rax, TDec
+    je .DefaultZero
+    cmp rax, TText
+    je .DefaultText
+    push rax
+    call KindOfType
+    pop rcx
+    cmp rax, KList
+    je .DefaultList
+    cmp rax, KMap
+    je .DefaultMap
+    cmp rax, KEnum
+    je .DefaultKind
+    Fail ErrNeedValue
+.DefaultZero:
+    CompileNum 0
+    jmp .Store
+.DefaultKind:
+    CompileNum 1
+    jmp .Store
+.DefaultText:
+    mov rcx, [rel TokPtr]
+    xor edx, edx
+    call CompileText
+    jmp .Store
+.DefaultList:
+    CompileNum 0
+    CompilePrim PrimMakeList
+    jmp .Store
+.DefaultMap:
+    CompileNum 0
+    CompilePrim PrimMakeMap
+    jmp .Store
 .Assign:
     call Advance
     call ParseExpr

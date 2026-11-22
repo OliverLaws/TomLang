@@ -229,8 +229,20 @@ ParseNumber:
     xor eax, eax
     test rdx, rdx
     jz .Fail
+    cmp rdx, 2
+    jbe .Loop
+    cmp byte [rcx], '0'
+    jne .Loop
+    movzx r8d, byte [rcx + 1]
+    or r8d, 32
+    cmp r8d, 'x'
+    je .Hex
+    cmp r8d, 'b'
+    je .Bin
 .Loop:
     movzx r8d, byte [rcx]
+    cmp r8d, '_'
+    je .Skip
     sub r8d, '0'
     cmp r8d, 9
     ja .Fail
@@ -238,9 +250,58 @@ ParseNumber:
     jo .Big
     add rax, r8
     jo .Big
+.Skip:
     inc rcx
     dec rdx
     jnz .Loop
+    mov edx, 1
+    ret
+.Hex:
+    add rcx, 2
+    sub rdx, 2
+.HexLoop:
+    movzx r8d, byte [rcx]
+    cmp r8d, '_'
+    je .HexNext
+    sub r8d, '0'
+    cmp r8d, 9
+    jbe .HexDigit
+    movzx r8d, byte [rcx]
+    or r8d, 32
+    sub r8d, 'a'
+    cmp r8d, 5
+    ja .Fail
+    add r8d, 10
+.HexDigit:
+    mov r9, rax
+    shr r9, 60
+    jnz .Big
+    shl rax, 4
+    or rax, r8
+.HexNext:
+    inc rcx
+    dec rdx
+    jnz .HexLoop
+    mov edx, 1
+    ret
+.Bin:
+    add rcx, 2
+    sub rdx, 2
+.BinLoop:
+    movzx r8d, byte [rcx]
+    cmp r8d, '_'
+    je .BinNext
+    sub r8d, '0'
+    cmp r8d, 1
+    ja .Fail
+    bt rax, 63
+    jc .Big
+    shl rax, 1
+    or rax, r8
+.BinNext:
+    inc rcx
+    dec rdx
+    jnz .BinLoop
     mov edx, 1
     ret
 .Fail:

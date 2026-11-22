@@ -76,6 +76,7 @@ SkipBody:
     IfTok "repeat", .Open
     IfTok "check", .Open
     IfTok "try", .Open
+    IfTok "do", .Open
     jmp .Loop
 .Open:
     inc rbx
@@ -411,6 +412,7 @@ CompileInstance:
     mov qword [rel MakingConst], 0
     mov qword [rel LaterCount], 0
     mov qword [rel ReplaceLen], 0
+    mov qword [rel NestListCount], 0
     mov rcx, [rel InstanceDepth]
     call EnterInstanceSpace
     inc qword [rel InstanceDepth]

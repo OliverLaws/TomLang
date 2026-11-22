@@ -98,7 +98,11 @@ IsTok:
     ret
 
 TypeError:
+    cmp qword [rel VoidCall], 2
+    je LaterResult
     Fail ErrType
+LaterResult:
+    Fail ErrLaterResult
 
 EmitJump:
     call Compile
@@ -170,6 +174,11 @@ ParseTypeNameInner:
     ja .NotVar
     cmp qword [rel InstanceMode], 0
     jne .Bound
+    cmp qword [rel NestInInstance], 0
+    je .Unbound
+    cmp qword [rel ForwardMode], 0
+    je .Bound
+.Unbound:
     cmp qword [rel AllowTypeVars], 0
     je .NotVar
     mov qword [rel GenericFound], 1
@@ -419,6 +428,8 @@ EmitSay:
     CompilePrim PrimSayBool
     ret
 .Nothing:
+    cmp qword [rel VoidCall], 2
+    je LaterResult
     Fail ErrNothing
 
 IsNameStart:
@@ -469,7 +480,7 @@ DropFn:
     jz .NoFn
     lea rcx, [rel BrokenBody]
     mov [rax + 8], rcx
-    mov qword [rel FnEntry], 0
+    call EndDef
 .NoFn:
     mov qword [rel InFn], 0
     mov qword [rel LocalCount], 0
@@ -484,7 +495,7 @@ ResetCompiler:
     jz .NoFn
     lea rcx, [rel BrokenBody]
     mov [rax + 8], rcx
-    mov qword [rel FnEntry], 0
+    call EndDef
 .NoFn:
     mov qword [rel InFn], 0
     mov qword [rel OpenBlocks], 0
@@ -544,6 +555,13 @@ AddLocal:
     mov qword [r9 + r8 * 8], 0
     lea r9, [rel LocalConst]
     mov qword [r9 + r8 * 8], 0
+    xor eax, eax
+    cmp qword [rel OpenBlocks], 1
+    jbe .Top
+    mov eax, 1
+.Top:
+    lea r9, [rel LocalInit]
+    mov [r9 + r8 * 8], rax
     inc qword [rel LocalCount]
     lea rax, [r8 * 8 + 2]
     ret
@@ -555,12 +573,20 @@ LookupVar:
     push rdx
     call FindLocal
     test rax, rax
-    jz .Global
+    jz .Outer
     add rsp, 16
     mov rcx, rax
     shr rcx, 3
     lea r8, [rel LocalConst]
     mov rdx, [r8 + rcx * 8]
+    ret
+.Outer:
+    mov rcx, [rsp + 8]
+    mov rdx, [rsp]
+    call FindOuter
+    test rax, rax
+    jz .Global
+    add rsp, 16
     ret
 .Global:
     pop rdx
@@ -586,7 +612,123 @@ LookupVar:
 NewVar:
     cmp qword [rel InFn], 0
     jne AddLocal
-    jmp CreateVar
+    cmp qword [rel OpenBlocks], 0
+    je CreateVar
+    call CreateVar
+    mov rcx, [rel InitVarCount]
+    cmp rcx, 4096
+    jae .Full
+    lea rdx, [rel InitVars]
+    mov [rdx + rcx * 8], rax
+    inc qword [rel InitVarCount]
+.Full:
+    ret
+
+EmitDefault:
+    cmp rax, TText
+    je .Text
+    push rax
+    call KindOfType
+    pop rcx
+    cmp rax, KList
+    je .List
+    cmp rax, KMap
+    je .Map
+    xor eax, eax
+    ret
+.Text:
+    lea rcx, [rel InitVarCount]
+    xor edx, edx
+    call CompileText
+    mov eax, 1
+    ret
+.List:
+    CompileNum 0
+    CompilePrim PrimMakeList
+    mov eax, 1
+    ret
+.Map:
+    CompileNum 0
+    CompilePrim PrimMakeMap
+    mov eax, 1
+    ret
+
+EmitLocalInits:
+    push rbx
+    push r12
+    xor ebx, ebx
+    xor r12d, r12d
+.Loop:
+    cmp rbx, [rel LocalCount]
+    jae .Done
+    lea rax, [rel LocalInit]
+    cmp qword [rax + rbx * 8], 0
+    je .Next
+    lea rax, [rel LocalType]
+    mov rax, [rax + rbx * 8]
+    test rax, rax
+    jz .Next
+    test r12, r12
+    jnz .Have
+    mov r12, [rel Here]
+.Have:
+    call EmitDefault
+    test eax, eax
+    jnz .Store
+    cmp r12, [rel Here]
+    jne .Next
+    xor r12d, r12d
+    jmp .Next
+.Store:
+    CompilePrim PrimLocalSet
+    mov rcx, rbx
+    shl rcx, 3
+    call Compile
+.Next:
+    inc rbx
+    jmp .Loop
+.Done:
+    test r12, r12
+    jz .Out
+    mov rax, [rel FnInitCell]
+    test rax, rax
+    jz .Out
+    CompilePrim PrimBranch
+    mov rcx, [rel FnInitCell]
+    add rcx, 8
+    call Compile
+    mov rax, [rel FnInitCell]
+    mov [rax], r12
+.Out:
+    pop r12
+    pop rbx
+    ret
+
+EmitGlobalInits:
+    push rbx
+    xor ebx, ebx
+.Loop:
+    cmp rbx, [rel InitVarCount]
+    jae .Done
+    lea rax, [rel InitVars]
+    mov rcx, [rax + rbx * 8]
+    push rcx
+    push rcx
+    call TypeOf
+    test rax, rax
+    jz .Skip
+    call EmitDefault
+    test eax, eax
+    jz .Skip
+    mov rcx, [rsp]
+    call EmitStore
+.Skip:
+    add rsp, 16
+    inc rbx
+    jmp .Loop
+.Done:
+    pop rbx
+    ret
 
 NewHidden:
     cmp qword [rel InFn], 0
@@ -611,7 +753,14 @@ MarkConst:
 TypeOf:
     test rcx, 2
     jnz .Local
+    test rcx, 4
+    jnz .Outer
     mov rax, [rcx - 8]
+    ret
+.Outer:
+    shr rcx, 3
+    lea rax, [rel NestSave]
+    mov rax, [rax + (LocalType - ParserState) + rcx * 8]
     ret
 .Local:
     shr rcx, 3
@@ -622,7 +771,14 @@ TypeOf:
 SetTypeOf:
     test rcx, 2
     jnz .Local
+    test rcx, 4
+    jnz .Outer
     mov [rcx - 8], rdx
+    ret
+.Outer:
+    shr rcx, 3
+    lea rax, [rel NestSave]
+    mov [rax + (LocalType - ParserState) + rcx * 8], rdx
     ret
 .Local:
     shr rcx, 3
@@ -634,6 +790,8 @@ EmitLoad:
     push rcx
     test rcx, 2
     jnz .Local
+    test rcx, 4
+    jnz .Outer
     CompilePrim PrimLit
     pop rcx
     call Compile
@@ -644,11 +802,20 @@ EmitLoad:
     pop rcx
     and rcx, -8
     jmp Compile
+.Outer:
+    CompilePrim PrimLinkGet
+    mov rcx, [rel NestLinkOff]
+    call Compile
+    pop rcx
+    and rcx, -8
+    jmp Compile
 
 EmitStore:
     push rcx
     test rcx, 2
     jnz .Local
+    test rcx, 4
+    jnz .Outer
     CompilePrim PrimLit
     pop rcx
     call Compile
@@ -656,6 +823,13 @@ EmitStore:
     ret
 .Local:
     CompilePrim PrimLocalSet
+    pop rcx
+    and rcx, -8
+    jmp Compile
+.Outer:
+    CompilePrim PrimLinkSet
+    mov rcx, [rel NestLinkOff]
+    call Compile
     pop rcx
     and rcx, -8
     jmp Compile
