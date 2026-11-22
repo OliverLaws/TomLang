@@ -10,7 +10,7 @@ do getPi(decimalPoints: number): text
         return "3"
     end
 
-    set len = (decimalPoints * 10) // 3 + 2
+    set len = ((decimalPoints + 4) * 10) // 3 + 2
     set a: list of number = []
     repeat len times
         a.add(2)
@@ -20,7 +20,7 @@ do getPi(decimalPoints: number): text
     set nines = 0
     set predigit = 0
 
-    repeat decimalPoints + 1 times
+    repeat decimalPoints + 4 times
         set q = 0
         set i = len
         repeat while i >= 1
@@ -55,9 +55,12 @@ do getPi(decimalPoints: number): text
     end
 
     out += text(predigit)
+    repeat nines times
+        out += "9"
+    end
 
     set decimals = ""
-    repeat each idx in 2..out.length
+    repeat each idx in 2..decimalPoints + 1
         decimals += out[idx]
     end
 
@@ -69,7 +72,7 @@ do getTau(decimalPoints: number): text
         return "6"
     end
 
-    set len = (decimalPoints * 10) // 3 + 2
+    set len = ((decimalPoints + 4) * 10) // 3 + 2
     set a: list of number = []
     repeat len times
         a.add(4)
@@ -79,7 +82,7 @@ do getTau(decimalPoints: number): text
     set nines = 0
     set predigit = 0
 
-    repeat decimalPoints + 1 times
+    repeat decimalPoints + 4 times
         set q = 0
         set i = len
         repeat while i >= 1
@@ -114,9 +117,12 @@ do getTau(decimalPoints: number): text
     end
 
     out += text(predigit)
+    repeat nines times
+        out += "9"
+    end
 
     set decimals = ""
-    repeat each idx in 2..out.length
+    repeat each idx in 2..decimalPoints + 1
         decimals += out[idx]
     end
 
@@ -152,17 +158,17 @@ do getE(decimalPoints: number): text
 end
 
 ## Basic
-do isEven(n): bool
+do isEven(n: number): bool
     return n % 2 == 0
 end
 
-do isOdd(n): bool
+do isOdd(n: number): bool
     return n % 2 != 0
 end
 
-do sum(items: list of T): T
+do sum(items: list of numeric): numeric
     if items.length == 0
-        error("sum requires a non-empty list")
+        fail "sum requires a non-empty list"
     end
     set total = items[1]
     repeat each i in 2..items.length
@@ -171,19 +177,27 @@ do sum(items: list of T): T
     return total
 end
 
-do average(items: list of T): decimal
+do average(items: list of numeric): decimal
     if items.length == 0
-        error("average requires a non-empty list")
+        fail "average requires a non-empty list"
     end
     return decimal(sum(items)) / decimal(items.length)
 end
 
-do median(items: list of T): decimal
+do median(items: list of numeric): decimal
     if items.length == 0
-        error("median requires a non-empty list")
+        fail "median requires a non-empty list"
     end
     set sorted = items.copy()
-    sorted.sort()
+    repeat i from 2 to sorted.length
+        set key = sorted[i]
+        set j = i - 1
+        repeat while j >= 1 and sorted[j] > key
+            sorted[j + 1] = sorted[j]
+            j -= 1
+        end
+        sorted[j + 1] = key
+    end
     set n = sorted.length
     set mid = n // 2
     if isOdd(n)
@@ -192,9 +206,9 @@ do median(items: list of T): decimal
     return decimal(sorted[mid] + sorted[mid + 1]) / 2.0
 end
 
-do product(items: list of T): T
+do product(items: list of numeric): numeric
     if items.length == 0
-        error("product requires a non-empty list")
+        fail "product requires a non-empty list"
     end
     set total = items[1]
     repeat each i in 2..items.length
@@ -203,17 +217,17 @@ do product(items: list of T): T
     return total
 end
 
-do min(a: T, b: T): T
+do min(a: numeric, b: numeric): numeric
     return a if a < b otherwise b
 end
 
-do max(a: T, b: T): T
+do max(a: numeric, b: numeric): numeric
     return a if a > b otherwise b
 end
 
-do minOf(items: list of T): T
+do minOf(items: list of numeric): numeric
     if items.length == 0
-        error("minOf requires a non-empty list")
+        fail "minOf requires a non-empty list"
     end
     set lowest = items[1]
     repeat each item in items
@@ -224,9 +238,9 @@ do minOf(items: list of T): T
     return lowest
 end
 
-do maxOf(items: list of T): T
+do maxOf(items: list of numeric): numeric
     if items.length == 0
-        error("maxOf requires a non-empty list")
+        fail "maxOf requires a non-empty list"
     end
     set highest = items[1]
     repeat each item in items
@@ -237,28 +251,15 @@ do maxOf(items: list of T): T
     return highest
 end
 
-do maxOf(items: list of T): T
-    if items.length == 0
-        error("maxOf requires a non-empty list")
-    end
-    set highest = items[1]
-    repeat each item in items
-        if item > highest
-            highest = item
-        end
-    end
-    return highest
-end
-
-do clamp(value: T, low: T, high: T): T
+do clamp(value: numeric, low: numeric, high: numeric): numeric
     return max(low, min(value, high))
 end
 
-do abs(x: T): T
+do abs(x: numeric): numeric
     return -x if x < 0 otherwise x
 end
 
-do sign(x: T): number
+do sign(x: numeric): number
     if x > 0
         return 1
     otherwise if x < 0
@@ -267,7 +268,7 @@ do sign(x: T): number
     return 0
 end
 
-do gcd(a, b): number
+do gcd(a: number, b: number): number
     a = abs(a)
     b = abs(b)
     repeat while b != 0
@@ -278,14 +279,14 @@ do gcd(a, b): number
     return a
 end
 
-do lcm(a, b): number
+do lcm(a: number, b: number): number
     if a == 0 or b == 0
         return 0
     end
     return (abs(a) // gcd(a, b)) * abs(b)
 end
 
-do factorial(n): number
+do factorial(n: number): number
     if n < 0
         return 0
     end
@@ -300,7 +301,7 @@ do approx(a: decimal, b: decimal, tolerance: decimal = 0.0001): bool
     return abs(a - b) <= tolerance
 end
 
-do mulMod(a, b, mod): number
+do mulMod(a: number, b: number, mod: number): number
     set res = 0
     a = a % mod
     repeat while b > 0
@@ -313,7 +314,7 @@ do mulMod(a, b, mod): number
     return res
 end
 
-do powMod(base, exp, mod): number
+do powMod(base: number, exp: number, mod: number): number
     set res = 1
     base = base % mod
     repeat while exp > 0
@@ -326,7 +327,7 @@ do powMod(base, exp, mod): number
     return res
 end
 
-do isPrime(n): bool
+do isPrime(n: number): bool
     if n <= 1
         return false
     end

@@ -189,6 +189,8 @@ NextToken:
     jne .NotArrow
     cmp byte [r10], '='
     je .Join
+    cmp byte [r10], '|'
+    je .Join
 .NotArrow:
     cmp cl, [r10]
     jne .Done

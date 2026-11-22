@@ -2,8 +2,15 @@ global TypeTable
 global TypeKind
 global ListOf
 global MapOf
+global UnionOf2
+global UnionWithout
+global UnionHas
+global MapKeyed
+global KeyOf
 global ElemOf
 global InternRecord
+global NewRecordType
+global NewPlaceholder
 global FieldCount
 global FieldInfo
 global FindField
@@ -15,11 +22,15 @@ extern AllocSlot
 extern Abort
 
 %define KList 5
+%define TText 2
 %define KMap  6
 %define KRec  7
 %define KEnum 8
 %define KFunc 9
 %define KVar  10
+%define KUnion 11
+%define KNil 12
+%define TNil 5
 %define MaxTypes 4096
 
 section .data
@@ -30,14 +41,17 @@ TypeTable:
     dq 2, 0, 0, 0
     dq 3, 0, 0, 0
     dq 4, 0, 0, 0
+    dq KNil, 0, 0, 0
 TypeTableRest:
-    times (MaxTypes - 5) * 4 dq 0
-TypeCount dq 5
+    times (MaxTypes - 6) * 4 dq 0
+TypeCount dq 6
 FuncTop dq FuncPool
 
 section .bss
 FuncPool resq 16384
-VarIds resq 26
+UnionBuf resq 32
+UnionN resq 1
+VarIds resq 27
 
 section .data
 ErrTypes db "too many different types in one program"
@@ -143,6 +157,217 @@ FuncOf:
     pop rbx
     ret
 
+UnionIntern:
+    TypeRoom
+    push rbx
+    push rsi
+    push rdi
+    lea r9, [rel TypeTable]
+    mov r10d, 5
+.Find:
+    cmp r10, [rel TypeCount]
+    jae .New
+    mov r11, r10
+    shl r11, 5
+    cmp qword [r9 + r11], KUnion
+    jne .Next
+    cmp [r9 + r11 + 8], rcx
+    jne .Next
+    cmp [r9 + r11 + 16], rdx
+    jne .Next
+    mov rsi, [r9 + r11 + 24]
+    xor ebx, ebx
+.Cmp:
+    cmp rbx, rdx
+    je .Found
+    mov rax, [rsi + rbx * 8]
+    cmp rax, [r8 + rbx * 8]
+    jne .Next
+    inc rbx
+    jmp .Cmp
+.Next:
+    inc r10
+    jmp .Find
+.Found:
+    mov rax, r10
+    jmp .Done
+.New:
+    mov rdi, [rel FuncTop]
+    lea rax, [rdi + rdx * 8]
+    lea rbx, [rel FuncPool + 16384 * 8 - 256]
+    cmp rax, rbx
+    jae TypesFull
+    xor ebx, ebx
+.Copy:
+    cmp rbx, rdx
+    je .Copied
+    mov rax, [r8 + rbx * 8]
+    mov [rdi + rbx * 8], rax
+    inc rbx
+    jmp .Copy
+.Copied:
+    lea rax, [rdi + rdx * 8]
+    mov [rel FuncTop], rax
+    mov rax, r10
+    shl rax, 5
+    mov qword [r9 + rax], KUnion
+    mov [r9 + rax + 8], rcx
+    mov [r9 + rax + 16], rdx
+    mov [r9 + rax + 24], rdi
+    inc qword [rel TypeCount]
+    mov rax, r10
+.Done:
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+UnionAdd:
+    push rcx
+    mov rax, rcx
+    shl rax, 5
+    lea r8, [rel TypeTable]
+    cmp qword [r8 + rax], KUnion
+    jne .One
+    mov r9, [r8 + rax + 16]
+    mov r10, [r8 + rax + 24]
+    xor r11d, r11d
+.Each:
+    cmp r11, r9
+    jae .Done
+    mov rcx, [r10 + r11 * 8]
+    push r9
+    push r10
+    push r11
+    call UnionAdd
+    pop r11
+    pop r10
+    pop r9
+    inc r11
+    jmp .Each
+.One:
+    mov rcx, [rsp]
+    mov rdx, [rel UnionN]
+    xor r9d, r9d
+.Scan:
+    cmp r9, rdx
+    jae .Insert
+    lea r10, [rel UnionBuf]
+    mov rax, [r10 + r9 * 8]
+    cmp rax, rcx
+    je .Done
+    ja .Insert
+    inc r9
+    jmp .Scan
+.Insert:
+    cmp rdx, 30
+    jae .Done
+    lea r10, [rel UnionBuf]
+    mov r11, rdx
+.Shift:
+    cmp r11, r9
+    jbe .Put
+    mov rax, [r10 + r11 * 8 - 8]
+    mov [r10 + r11 * 8], rax
+    dec r11
+    jmp .Shift
+.Put:
+    mov [r10 + r9 * 8], rcx
+    inc qword [rel UnionN]
+.Done:
+    pop rcx
+    ret
+
+UnionOf2:
+    push rdx
+    mov qword [rel UnionN], 0
+    call UnionAdd
+    pop rcx
+    call UnionAdd
+    cmp qword [rel UnionN], 1
+    jne .Many
+    mov rax, [rel UnionBuf]
+    ret
+.Many:
+    xor ecx, ecx
+    mov rdx, [rel UnionN]
+    lea r8, [rel UnionBuf]
+    jmp UnionIntern
+
+UnionWithout:
+    push rbx
+    push r12
+    mov rbx, rcx
+    mov r12, rdx
+    mov qword [rel UnionN], 0
+    mov rax, rbx
+    shl rax, 5
+    lea r8, [rel TypeTable]
+    cmp qword [r8 + rax], KUnion
+    jne .Same
+    mov r9, [r8 + rax + 16]
+    mov r10, [r8 + rax + 24]
+    xor r11d, r11d
+.Each:
+    cmp r11, r9
+    jae .Built
+    mov rcx, [r10 + r11 * 8]
+    cmp rcx, r12
+    je .Skip
+    push r9
+    push r10
+    push r11
+    call UnionAdd
+    pop r11
+    pop r10
+    pop r9
+.Skip:
+    inc r11
+    jmp .Each
+.Built:
+    cmp qword [rel UnionN], 1
+    jne .Many
+    mov rax, [rel UnionBuf]
+    jmp .Out
+.Many:
+    xor ecx, ecx
+    mov rdx, [rel UnionN]
+    lea r8, [rel UnionBuf]
+    call UnionIntern
+    jmp .Out
+.Same:
+    mov rax, rbx
+.Out:
+    pop r12
+    pop rbx
+    ret
+
+UnionHas:
+    cmp rcx, rdx
+    je .Yes
+    mov rax, rcx
+    shl rax, 5
+    lea r8, [rel TypeTable]
+    cmp qword [r8 + rax], KUnion
+    jne .No
+    mov r9, [r8 + rax + 16]
+    mov r10, [r8 + rax + 24]
+    xor r11d, r11d
+.Each:
+    cmp r11, r9
+    jae .No
+    cmp [r10 + r11 * 8], rdx
+    je .Yes
+    inc r11
+    jmp .Each
+.Yes:
+    mov eax, 1
+    ret
+.No:
+    xor eax, eax
+    ret
+
+
 VarTypeOf:
     lea rdx, [rel VarIds]
     mov rax, [rdx + rcx * 8]
@@ -165,11 +390,22 @@ VarTypeOf:
 ListOf:
     TypeRoom
     mov r8d, KList
+    xor r11d, r11d
     jmp Intern1
 
 MapOf:
     TypeRoom
     mov r8d, KMap
+    xor r11d, r11d
+    jmp Intern1
+
+MapKeyed:
+    TypeRoom
+    mov r8d, KMap
+    xor r11d, r11d
+    cmp rdx, TText
+    je Intern1
+    mov r11, rdx
 
 Intern1:
     lea r9, [rel TypeTable]
@@ -183,6 +419,8 @@ Intern1:
     jne .Next
     cmp [r9 + rax + 8], rcx
     jne .Next
+    cmp [r9 + rax + 16], r11
+    jne .Next
     mov rax, r10
     ret
 .Next:
@@ -193,8 +431,19 @@ Intern1:
     shl rax, 5
     mov [r9 + rax], r8
     mov [r9 + rax + 8], rcx
+    mov [r9 + rax + 16], r11
     inc qword [rel TypeCount]
     mov rax, r10
+    ret
+
+KeyOf:
+    shl rcx, 5
+    lea rax, [rel TypeTable]
+    mov rax, [rax + rcx + 16]
+    test rax, rax
+    jnz .Done
+    mov eax, TText
+.Done:
     ret
 
 FieldCount:
@@ -274,6 +523,8 @@ InternRecord:
     add rsi, rax
     cmp qword [rsi], KRec
     jne .NextCandidate
+    cmp qword [rsi + 8], 0
+    jne .NextCandidate
     cmp [rsi + 16], r12
     jne .NextCandidate
     xor edi, edi
@@ -336,4 +587,28 @@ InternRecord:
     pop rdi
     pop rsi
     pop rbx
+    ret
+
+NewRecordType:
+    TypeRoom
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    mov r12, rcx
+    mov r13, rdx
+    jmp InternRecord.New
+
+NewPlaceholder:
+    TypeRoom
+    mov rax, [rel TypeCount]
+    mov rcx, rax
+    shl rcx, 5
+    lea rdx, [rel TypeTable]
+    mov qword [rdx + rcx], 14
+    mov qword [rdx + rcx + 8], 0
+    mov qword [rdx + rcx + 16], 0
+    mov qword [rdx + rcx + 24], 0
+    inc qword [rel TypeCount]
     ret

@@ -1,13 +1,27 @@
 ReturnWord:
     cmp qword [rel InFn], 0
     je .Bad
+    cmp qword [rel LaterEmitting], 0
+    jne .Bad
+    mov r8, [rel FnSig]
+    mov rax, [r8 - 8]
+    call SetHint
     call Advance
+    cmp qword [rel TokLen], 0
+    je .Bare
+    call SameLine
+    test eax, eax
+    jz .Bare
+    IfTok "end", .Bare
     call ParseExpr
     IfTok ",", .Tuple
     jmp .Typed
 .Tuple:
     call ParseTuple
 .Typed:
+    mov r8, [rel FnSig]
+    mov rax, [r8 - 8]
+    call CoerceTo
     mov rax, [rel ExprType]
     test rax, rax
     jz TypeError
@@ -37,8 +51,21 @@ ReturnWord:
     mov ecx, TagFn
     call EndTries
     call EmitLaters
-    CompilePrim PrimReturn
+    call EmitReturn
     jmp Pushback
+.Bare:
+    mov r8, [rel FnSig]
+    mov rax, [r8 - 8]
+    test rax, rax
+    jnz .NeedValue
+    CompileNum 0
+    mov ecx, TagFn
+    call EndTries
+    call EmitLaters
+    call EmitReturn
+    jmp Pushback
+.NeedValue:
+    Fail ErrReturnValue
 .Bad:
     Fail ErrReturn
 
@@ -53,16 +80,111 @@ DoWord:
     call Advance
     cmp qword [rel TokLen], 0
     je .Bad
+    mov qword [rel MethodSelf], 0
+    mov qword [rel OpMode], 0
+    mov qword [rel NarrowCount], 0
+    IfTok "(", .Operator
+    IfTok "-", .Unary
     call IsNameStart
     test eax, eax
     jz .Bad
     mov rcx, [rel TokPtr]
     mov rdx, [rel TokLen]
+    mov [rel DefNamePtr], rcx
+    mov [rel DefNameLen], rdx
+    cmp byte [rcx + rdx], '.'
+    jne .NameSet
+    cmp qword [rel NestDepth], 0
+    jne .Bad
+    call MethodOwner
+    mov [rel MethodSelf], rax
+    call Advance
+    call Advance
+    call IsNameStart
+    test eax, eax
+    jz .Bad
+    mov rcx, [rel DefNamePtr]
+    mov rdx, [rel TokPtr]
+    add rdx, [rel TokLen]
+    sub rdx, rcx
+    mov [rel DefNameLen], rdx
+    jmp .NameSet
+.Unary:
+    cmp qword [rel NestDepth], 0
+    jne .Bad
+    call UnaryHead
+    push rdx
+    call CopyString
+    pop rdx
+    mov [rel DefNamePtr], rax
+    mov [rel DefNameLen], rdx
+    mov qword [rel OpMode], 3
+    jmp .OpCheck
+.Operator:
+    cmp qword [rel NestDepth], 0
+    jne .Bad
+    call OperatorHead
+    push rdx
+    call CopyString
+    pop rdx
+    mov [rel DefNamePtr], rax
+    mov [rel DefNameLen], rdx
+    mov qword [rel OpMode], 1
+.OpCheck:
+    cmp qword [rel PreScanActive], 0
+    jne .NotDone
+    cmp qword [rel InstanceMode], 0
+    jne .NotDone
+    push qword [rel NamePrefixLen]
+    push rax
+    mov qword [rel NamePrefixLen], 0
+    mov rcx, [rel DefNamePtr]
+    mov rdx, [rel DefNameLen]
+    call ForwardDone
+    pop rcx
+    pop qword [rel NamePrefixLen]
+    test eax, eax
+    jz .NotDone
+    mov qword [rel OpMode], 0
+    call SkipBody
+    mov qword [rel TokLen], 0
+    ret
+.NameSet:
+    cmp qword [rel PreScanActive], 0
+    jne .NotDone
+    cmp qword [rel InstanceMode], 0
+    jne .NotDone
+    mov rax, [rel NestDepth]
+    cmp rax, [rel NestFloor]
+    jne .NotDone
+    mov rcx, [rel DefNamePtr]
+    mov rdx, [rel DefNameLen]
+    call ForwardDone
+    test eax, eax
+    jz .NotDone
+    mov qword [rel MethodSelf], 0
+    call SkipBody
+    mov qword [rel TokLen], 0
+    ret
+.NotDone:
+    mov rcx, [rel DefNamePtr]
+    mov rdx, [rel DefNameLen]
     cmp qword [rel InstanceMode], 0
     je .Named
     xor edx, edx
 .Named:
+    cmp qword [rel OpMode], 0
+    je .PlainDef
+    push qword [rel NamePrefixLen]
+    push rax
+    mov qword [rel NamePrefixLen], 0
     call BeginDef
+    pop rax
+    pop qword [rel NamePrefixLen]
+    jmp .Defined
+.PlainDef:
+    call BeginDef
+.Defined:
     mov rax, [rel Latest]
     mov byte [rax + 16], 4
     mov ebx, SigCells
@@ -79,7 +201,8 @@ DoWord:
     jne .NoPatch
     cmp qword [rel InstanceMode], 0
     jne .NoPatch
-    cmp qword [rel NestDepth], 0
+    mov rax, [rel NestDepth]
+    cmp rax, [rel NestFloor]
     jne .NoPatch
     call PatchForward
 .NoPatch:
@@ -87,7 +210,22 @@ DoWord:
     mov qword [rel InFn], 1
     mov qword [rel LocalCount], 0
     mov qword [rel LaterCount], 0
+    call NextFnId
+    mov [rel CurFnId], rax
+    mov qword [rel CurLinkOff], -1
+    mov qword [rel CurHeap], 0
+    cmp qword [rel ForwardMode], 0
+    jne .StackFrame
+    mov rcx, [rel DoStart]
+    call ScanClosures
+    mov [rel CurHeap], rax
+    test rax, rax
+    jz .StackFrame
+    CompilePrim PrimEnterHeap
+    jmp .Entered
+.StackFrame:
     CompilePrim PrimEnter
+.Entered:
     mov rax, [rel Here]
     mov [rel FnFrameSlot], rax
     xor ecx, ecx
@@ -95,6 +233,10 @@ DoWord:
     call Advance
     Expect "(", ErrParen
     call Advance
+    cmp qword [rel MethodSelf], 0
+    je .NoSelf
+    call AddSelfParam
+.NoSelf:
     IfTok ")", .ParamsDone
 .ParamLoop:
     cmp qword [rel TokLen], 0
@@ -225,6 +367,16 @@ DoWord:
     sub r8, 24
     sub r8, r9
     mov [r8], rax
+    cmp qword [rel OpMode], 1
+    jne .NotOp
+    Expect ")", ErrOpHead
+    call Advance
+    call Advance
+    Expect "(", ErrOpHead
+    call Advance
+    mov qword [rel OpMode], 2
+    jmp .ParamLoop
+.NotOp:
     IfTok ",", .NextParam
     IfTok ")", .ParamsDone
 .BadParen:
@@ -234,6 +386,19 @@ DoWord:
     jmp .ParamLoop
 .ParamsDone:
     mov rax, [rel LocalCount]
+    cmp qword [rel OpMode], 0
+    je .ParamsOk
+    cmp qword [rel OpMode], 3
+    jne .TwoParams
+    mov qword [rel OpMode], 0
+    cmp rax, 1
+    jne .OpBad
+    jmp .ParamsOk
+.TwoParams:
+    mov qword [rel OpMode], 0
+    cmp rax, 2
+    jne .OpBad
+.ParamsOk:
     mov r8, [rel FnSig]
     mov [r8 - 16], rax
     call Advance
@@ -249,7 +414,8 @@ DoWord:
     mov qword [rel AllowTypeVars], 0
     cmp qword [rel ForwardMode], 0
     jne ForwardFinish
-    cmp qword [rel NestDepth], 0
+    mov rax, [rel NestDepth]
+    cmp rax, [rel NestFloor]
     je .NotNested
     cmp qword [rel GenericFound], 0
     jne .NestGeneric
@@ -257,12 +423,22 @@ DoWord:
     mov edx, 6
     call AddLocal
     and rax, -8
-    mov [rel NestLinkOff], rax
+    mov [rel CurLinkOff], rax
+    mov rcx, [rel ScopeCount]
+    dec rcx
+    shl rcx, 6
+    lea rdx, [rel ScopeTab]
+    mov rax, [rdx + rcx + 48]
+    shl rax, 8
+    or rax, 4
     mov r8, [rel FnSig]
-    or qword [r8 - SigFlags], 4
+    or [r8 - SigFlags], rax
+    mov rcx, [rel NestDepth]
     mov rax, [rel FnEntry]
-    mov [rel NestEntry], rax
-    mov qword [rel NestHeaderDone], 1
+    lea rdx, [rel NestEntryTab]
+    mov [rdx + rcx * 8 - 8], rax
+    lea rdx, [rel NestDoneTab]
+    mov qword [rdx + rcx * 8 - 8], 1
 .NotNested:
     cmp qword [rel GenericFound], 0
     jne GenericDefine
@@ -291,6 +467,8 @@ DoWord:
     ret
 .TooMany:
     Fail ErrTooMany
+.OpBad:
+    Fail ErrOpHead
 .NestGeneric:
     Fail ErrNestGeneric
 .MaybeNested:
@@ -300,8 +478,8 @@ DoWord:
     je .Bad
     cmp qword [rel OuterFrame], 0
     jne .Bad
-    cmp qword [rel NestDepth], 0
-    jne .NestDeep
+    cmp qword [rel NestDepth], MaxNest
+    jae .NestDeep
     call NestBegin
     jmp .Begin
 .NestDeep:
@@ -316,22 +494,38 @@ DoWord:
 NestBegin:
     push rsi
     push rdi
+    push rbx
+    mov rbx, [rel NestDepth]
+    imul rdi, rbx, (ParserStateEnd - ParserState)
+    lea rax, [rel NestSaves]
+    add rdi, rax
+    push rdi
     lea rsi, [rel ParserState]
-    lea rdi, [rel NestSave]
     mov rcx, (ParserStateEnd - ParserState) / 8
     rep movsq
+    pop rdi
+    mov rcx, rdi
+    call ScopePushSaved
+    lea rdx, [rel NestVarTab]
+    mov rax, rbx
+    shl rax, 5
+    add rdx, rax
     mov rax, [rel Here]
-    mov [rel NestVars], rax
+    mov [rdx], rax
     mov rax, [rel SavedHere]
-    mov [rel NestVars + 8], rax
+    mov [rdx + 8], rax
     mov rax, [rel FnEntry]
-    mov [rel NestVars + 16], rax
-    mov ecx, NestRegion
+    mov [rdx + 16], rax
+    lea ecx, [rbx + NestRegion]
     call EnterInstanceSpace
+    lea rdx, [rel NestInstTab]
     mov rax, [rel InstanceMode]
+    or rax, [rel NestInInstance]
+    mov [rdx + rbx * 8], rax
     mov [rel NestInInstance], rax
-    mov qword [rel NestDepth], 1
-    mov qword [rel NestHeaderDone], 0
+    lea rdx, [rel NestDoneTab]
+    mov qword [rdx + rbx * 8], 0
+    inc qword [rel NestDepth]
     mov qword [rel NestPending], 0
     mov qword [rel InFn], 0
     mov qword [rel OpenBlocks], 0
@@ -345,63 +539,77 @@ NestBegin:
     mov qword [rel OuterFrame], 0
     mov qword [rel MakingConst], 0
     mov qword [rel ReplaceLen], 0
+    pop rbx
     pop rdi
     pop rsi
     ret
 
 NestEnd:
     mov qword [rel NestPending], 0
-    cmp qword [rel NestHeaderDone], 0
+    mov rcx, [rel NestDepth]
+    lea rdx, [rel NestDoneTab]
+    cmp qword [rdx + rcx * 8 - 8], 0
     je NestAbort
+    lea rdx, [rel NestEntryTab]
+    mov rax, [rdx + rcx * 8 - 8]
+    push rax
+    push rax
     call NestAbort
+    pop rdx
+    pop rdx
     mov rax, [rel NestListCount]
     cmp rax, 64
     jae .Full
     lea rcx, [rel NestList]
-    mov rdx, [rel NestEntry]
     mov [rcx + rax * 8], rdx
     inc qword [rel NestListCount]
 .Full:
     ret
+
 NestAbort:
     push rsi
     push rdi
-    lea rsi, [rel NestSave]
+    push rbx
+    dec qword [rel NestDepth]
+    mov rbx, [rel NestDepth]
+    imul rsi, rbx, (ParserStateEnd - ParserState)
+    lea rax, [rel NestSaves]
+    add rsi, rax
     lea rdi, [rel ParserState]
     mov rcx, (ParserStateEnd - ParserState) / 8
     rep movsq
-    mov rax, [rel NestVars]
+    lea rdx, [rel NestVarTab]
+    mov rax, rbx
+    shl rax, 5
+    add rdx, rax
+    mov rax, [rdx]
     mov [rel Here], rax
-    mov rax, [rel NestVars + 8]
+    mov rax, [rdx + 8]
     mov [rel SavedHere], rax
-    mov rax, [rel NestVars + 16]
+    mov rax, [rdx + 16]
     mov [rel FnEntry], rax
-    mov ecx, NestRegion
+    lea ecx, [rbx + NestRegion]
     call LeaveInstanceSpace
-    mov qword [rel NestDepth], 0
-    mov qword [rel NestHeaderDone], 0
-    mov qword [rel NestInInstance], 0
+    xor eax, eax
+    test rbx, rbx
+    jz .Top
+    lea rdx, [rel NestInstTab]
+    mov rax, [rdx + rbx * 8 - 8]
+.Top:
+    mov [rel NestInInstance], rax
+    pop rbx
     pop rdi
     pop rsi
     ret
 
-EmitLink:
-    cmp qword [rel OuterFrame], 0
-    jne .Bad
-    cmp qword [rel InFn], 0
-    je .Bad
-    cmp qword [rel NestDepth], 0
-    je .Frame
-    cmp qword [rel NestHeaderDone], 0
-    je .Bad
-    CompilePrim PrimLocalGet
-    mov rcx, [rel NestLinkOff]
-    jmp Compile
-.Frame:
-    CompilePrim PrimPushFrame
+NestHeaderDone:
+    mov rax, [rel NestDepth]
+    test rax, rax
+    jz .Out
+    lea rdx, [rel NestDoneTab]
+    mov rax, [rdx + rax * 8 - 8]
+.Out:
     ret
-.Bad:
-    Fail ErrNestCall
 
 HideNested:
     xor eax, eax
@@ -417,51 +625,98 @@ HideNested:
     mov qword [rel NestListCount], 0
     ret
 
-FindOuter:
-    xor eax, eax
-    cmp qword [rel NestDepth], 0
-    je .None
-    cmp qword [rel InFn], 0
-    je .None
-    cmp qword [rel OuterFrame], 0
-    jne .None
+EmitLink:
+    mov rcx, [rax - SigFlags]
+    shr rcx, 8
+    call OwnerDistance
+    cmp rax, -1
+    je .Bad
+    mov rcx, rax
+    jmp EmitFrameOf
+.Bad:
+    Fail ErrNestCall
+
+FullForward:
+    mov qword [rel ForwardMode], 0
+    mov qword [rel FnEntry], 0
+    call DoWord
+    mov rax, [rel FnEntry]
+    mov [rel FullEntry], rax
+.Body:
+    cmp qword [rel OpenBlocks], 0
+    je .Done
+    call ParseAnyStatement
+    jmp .Body
+.Done:
+    cmp qword [rel FullEntry], 0
+    je .Out
+    cmp qword [rel ForwardCount], MaxForward
+    jae .Out
+    mov rcx, [rel ForwardCount]
+    imul rcx, rcx, 24
+    lea rdx, [rel ForwardTable]
+    add rdx, rcx
+    mov rax, [rel FullEntry]
+    mov [rdx], rax
+    mov qword [rdx + 8], 1
+    mov rcx, [rel CurFile]
+    mov [rdx + 16], rcx
+    inc qword [rel ForwardCount]
+.Out:
+    ret
+
+ForwardDone:
     push rbx
     push rsi
     push rdi
-    mov r8, rcx
-    mov r9, rdx
-    lea r10, [rel NestSave]
-    mov r11, [r10 + (LocalCount - ParserState)]
+    push r12
+    push r13
+    mov r12, rcx
+    mov r13, rdx
+    mov r8, [rel NamePrefixLen]
+    lea r9, [r8 + r13]
+    cmp r9, 250
+    ja .No
+    lea rdi, [rel FwdNameBuf]
+    mov rsi, [rel NamePrefixPtr]
+    mov rcx, r8
+    rep movsb
+    mov rsi, r12
+    mov rcx, r13
+    rep movsb
     xor ebx, ebx
-.Scan:
-    cmp rbx, r11
-    jae .NotFound
-    mov rax, [r10 + (LocalLen - ParserState) + rbx * 8]
+.Find:
+    cmp rbx, [rel ForwardCount]
+    jae .No
+    imul rax, rbx, 24
+    lea rdx, [rel ForwardTable]
+    add rdx, rax
+    inc rbx
+    cmp qword [rdx + 8], 1
+    jne .Find
+    mov rax, [rdx + 16]
+    cmp rax, [rel CurFile]
+    jne .Find
+    mov r10, [rdx]
+    movzx eax, byte [r10 + 17]
     cmp rax, r9
-    jne .Next
-    test rax, rax
-    jz .Next
-    mov rsi, [r10 + (LocalPtr - ParserState) + rbx * 8]
-    mov rdi, r8
+    jne .Find
+    lea rsi, [r10 + 18]
+    lea rdi, [rel FwdNameBuf]
     mov rcx, r9
     repe cmpsb
-    je .Found
-.Next:
-    inc rbx
-    jmp .Scan
-.Found:
-    mov rdx, [r10 + (LocalConst - ParserState) + rbx * 8]
-    lea rax, [rbx * 8 + 4]
-    pop rdi
-    pop rsi
-    pop rbx
-    ret
-.NotFound:
+    jne .Find
+    mov qword [rdx + 8], 2
+    mov eax, 1
+    jmp .Out
+.No:
     xor eax, eax
+.Out:
+    pop r13
+    pop r12
     pop rdi
     pop rsi
     pop rbx
-.None:
     ret
 
 ForwardFinish:
@@ -504,8 +759,8 @@ PatchForward:
     add rdx, rax
     inc rbx
     mov rax, [rdx + 8]
-    test rax, rax
-    jz .Find
+    cmp rax, 2
+    jbe .Find
     mov rax, [rdx + 16]
     cmp rax, [rel CurFile]
     jne .Find
@@ -540,11 +795,17 @@ PreDeclare:
     push rbp
     mov r12, rcx
     mov r13, rdx
+    mov rbx, [rel PreScanActive]
+    imul rdi, rbx, (ParserStateEnd - ParserState)
+    lea rax, [rel PreScanSaves]
+    add rdi, rax
     lea rsi, [rel ParserState]
-    lea rdi, [rel PreScanSave]
     mov rcx, (ParserStateEnd - ParserState) / 8
     rep movsq
-    lea rdi, [rel PreScanVars]
+    mov rdi, rbx
+    shl rdi, 6
+    lea rax, [rel PreScanVarTab]
+    add rdi, rax
     mov rax, [rel Latest]
     mov [rdi], rax
     mov rax, [rel DictHere]
@@ -556,11 +817,17 @@ PreDeclare:
     mov rax, [rel FnEntry]
     mov [rdi + 32], rax
     mov [rdi + 40], r15
-    mov ecx, ForwardRegion
+    mov rax, [rel ForwardMode]
+    mov [rdi + 48], rax
+    lea ecx, [rbx + ForwardRegion]
     call EnterInstanceSpace
-    mov [rel PreScanRsp], rsp
-    mov qword [rel PreScanActive], 1
+    lea rax, [rel PreScanRspTab]
+    mov [rax + rbx * 8], rsp
+    inc qword [rel PreScanActive]
     mov qword [rel ForwardMode], 1
+    mov qword [rel ScopeCount], 0
+    mov rax, [rel NestDepth]
+    mov [rel NestFloor], rax
     mov qword [rel InFn], 0
     mov qword [rel OpenBlocks], 0
     mov qword [rel InstanceMode], 0
@@ -578,21 +845,32 @@ PreDeclare:
     mov [rel TokPtr], r12
     mov [rel PrevTokPtr], r12
     mov [rel TokLen], r13
-    call DoWord
+    call [rel PreHandler]
     call PreRestore
     jmp PreDeclareOut
 
 PreScanFail:
-    mov rsp, [rel PreScanRsp]
+    mov rbx, [rel PreScanActive]
+    dec rbx
+    lea rax, [rel PreScanRspTab]
+    mov rsp, [rax + rbx * 8]
     call PreRestore
-    lea rdi, [rel PreScanVars]
-    mov rax, [rdi]
+    mov rdi, rbx
+    shl rdi, 6
+    lea rax, [rel PreScanVarTab]
+    mov rax, [rax + rdi]
     mov [rel Latest], rax
 PreDeclareOut:
-    mov ecx, ForwardRegion
+    mov rbx, [rel PreScanActive]
+    dec rbx
+    lea ecx, [rbx + ForwardRegion]
     call LeaveInstanceSpace
-    mov qword [rel PreScanActive], 0
-    mov qword [rel ForwardMode], 0
+    mov rdi, rbx
+    shl rdi, 6
+    lea rax, [rel PreScanVarTab]
+    mov rax, [rax + rdi + 48]
+    mov [rel ForwardMode], rax
+    dec qword [rel PreScanActive]
     pop rbp
     pop r14
     pop r13
@@ -603,11 +881,19 @@ PreDeclareOut:
     ret
 
 PreRestore:
-    lea rsi, [rel PreScanSave]
+    mov rax, [rel PreScanActive]
+    dec rax
+    push rax
+    imul rsi, rax, (ParserStateEnd - ParserState)
+    lea rdx, [rel PreScanSaves]
+    add rsi, rdx
     lea rdi, [rel ParserState]
     mov rcx, (ParserStateEnd - ParserState) / 8
     rep movsq
-    lea rdi, [rel PreScanVars]
+    pop rdi
+    shl rdi, 6
+    lea rax, [rel PreScanVarTab]
+    add rdi, rax
     mov rax, [rdi + 16]
     mov [rel Here], rax
     mov rax, [rdi + 24]

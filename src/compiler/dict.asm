@@ -8,6 +8,9 @@ extern KeepWord
 extern IfWord
 extern OtherwiseWord
 extern EndWord
+extern RecordWord
+extern InterfaceWord
+extern TypeWord
 extern RepeatWord
 extern StopWord
 extern SkipWord
@@ -48,6 +51,9 @@ DefImm "return", ReturnWord
 DefImm "bye", ByeWord
 DefImm "fail", FailWord
 DefImm "kind", KindWord
+DefImm "record", RecordWord
+DefImm "interface", InterfaceWord
+DefImm "type", TypeWord
 DefImm "check", CheckWord
 DefImm "is", IsWord
 DefImm "try", TryWord

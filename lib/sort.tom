@@ -1,0 +1,351 @@
+# General sorts
+do sort(items: list of T)
+    introSort(items)
+end
+
+do sorted(items: list of T): list of T
+    set out = items.copy()
+    sort(out)
+    return out
+end
+
+do sortDesc(items: list of T)
+    sort(items)
+    reverse(items)
+end
+
+do sortedDesc(items: list of T): list of T
+    set out = items.copy()
+    sortDesc(out)
+    return out 
+end
+
+# Specific algorithms
+do insertionSort(items: list of T, low: number = 1, high: number = -1)
+    set endIdx = items.length if high == -1 otherwise high
+    repeat i from low + 1 to endIdx
+        set key = items[i]
+        set j = i - 1
+        repeat while j >= low and items[j] > key
+            items[j + 1] = items[j]
+            j -= 1
+        end
+        items[j + 1] = key
+    end
+end
+
+do heapSort(items: list of T, low: number = 1, high: number = -1)
+    set endIdx = items.length if high == -1 otherwise high
+    set offset = low - 1
+    set count = endIdx - low + 1
+
+    if count > 1
+        do siftDown(root: number, limit: number)
+            set current = root
+            repeat forever
+                set left = current * 2
+                if left > limit
+                    stop
+                end
+
+                set largest = current
+                if items[offset + left] > items[offset + largest]
+                    largest = left
+                end
+
+                set right = left + 1
+                if right <= limit and items[offset + right] > items[offset + largest]
+                    largest = right
+                end
+
+                if largest == current
+                    stop
+                end
+
+                items[offset + current], items[offset + largest] = items[offset + largest], items[offset + current]
+                current = largest
+            end
+        end
+
+        repeat start from count // 2 to 1 by -1
+            siftDown(start, count)
+        end
+
+        repeat tail from count to 2 by -1
+            items[offset + 1], items[offset + tail] = items[offset + tail], items[offset + 1]
+            siftDown(1, tail - 1)
+        end
+    end
+end
+
+do mergeSort(items: list of T)
+    if items.length > 1
+        set scratch = items.copy()
+
+        do merge(src: list of T, dst: list of T, low: number, mid: number, high: number)
+            set left = low
+            set right = mid + 1
+            set dest = low
+
+            repeat while left <= mid and right <= high
+                if src[left] <= src[right]
+                    dst[dest] = src[left]
+                    left += 1
+                otherwise
+                    dst[dest] = src[right]
+                    right += 1
+                end
+                dest += 1
+            end
+
+            repeat while left <= mid
+                dst[dest] = src[left]
+                left += 1
+                dest += 1
+            end
+
+            repeat while right <= high
+                dst[dest] = src[right]
+                right += 1
+                dest += 1
+            end
+        end
+
+        do sortRange(src: list of T, dst: list of T, low: number, high: number)
+            if high - low < 16
+                repeat i from low + 1 to high
+                    set key = dst[i]
+                    set j = i - 1
+                    repeat while j >= low and dst[j] > key
+                        dst[j + 1] = dst[j]
+                        j -= 1
+                    end
+                    dst[j + 1] = key
+                end
+            otherwise
+                set mid = (low + high) // 2
+                sortRange(dst, src, low, mid)
+                sortRange(dst, src, mid + 1, high)
+
+                if src[mid] <= src[mid + 1]
+                    repeat idx from low to high
+                        dst[idx] = src[idx]
+                    end
+                otherwise
+                    merge(src, dst, low, mid, high)
+                end
+            end
+        end
+
+        sortRange(scratch, items, 1, items.length)
+    end
+end
+
+do introSort(items: list of T)
+    set count = items.length
+    if count > 1
+        set alreadySorted = true
+        repeat i from 1 to count - 1
+            if items[i] > items[i + 1]
+                alreadySorted = false
+                stop
+            end
+        end
+
+        if not alreadySorted
+            if count <= 20
+                insertionSort(items)
+            otherwise
+                set maxDepth = 0
+                set n = count
+                repeat while n > 1
+                    n = n // 2
+                    maxDepth += 2
+                end
+
+                do sortRange(low: number, high: number, depthLeft: number)
+                    if high - low < 16
+                        insertionSort(items, low, high)
+                    otherwise if depthLeft == 0
+                        heapSort(items, low, high)
+                    otherwise
+                        set left = low
+                        set right = high
+                        set pivot = items[(low + high) // 2]
+
+                        repeat while left <= right
+                            repeat while items[left] < pivot and left < high
+                                left += 1
+                            end
+                            repeat while pivot < items[right] and right > low
+                                right -= 1
+                            end
+                            if left <= right
+                                items[left], items[right] = items[right], items[left]
+                                left += 1
+                                right -= 1
+                            end
+                        end
+
+                        if low < right
+                            sortRange(low, right, depthLeft - 1)
+                        end
+                        if left < high
+                            sortRange(left, high, depthLeft - 1)
+                        end
+                    end
+                end
+
+                sortRange(1, count, maxDepth)
+            end
+        end
+    end
+end
+
+do timSort(items: list of T)
+    set count = items.length
+    if count > 1
+        keep RunSize = 32
+        set start = 1
+        repeat while start <= count
+            set stopIdx = start + RunSize - 1
+            if stopIdx > count
+                stopIdx = count
+            end
+            insertionSort(items, start, stopIdx)
+            start += RunSize
+        end
+
+        set temp = items.copy()
+        set size = RunSize
+        repeat while size < count
+            set left = 1
+            repeat while left <= count
+                set mid = left + size - 1
+                if mid >= count
+                    stop
+                end
+                set right = left + size * 2 - 1
+                if right > count
+                    right = count
+                end
+
+                if items[mid] > items[mid + 1]
+                    repeat idx from left to right
+                        temp[idx] = items[idx]
+                    end
+                    set i = left
+                    set j = mid + 1
+                    set dest = left
+                    repeat while i <= mid and j <= right
+                        if temp[i] <= temp[j]
+                            items[dest] = temp[i]
+                            i += 1
+                        otherwise
+                            items[dest] = temp[j]
+                            j += 1
+                        end
+                        dest += 1
+                    end
+                    repeat while i <= mid
+                        items[dest] = temp[i]
+                        i += 1
+                        dest += 1
+                    end
+                end
+                left += size * 2
+            end
+            size *= 2
+        end
+    end
+end
+
+do countingSort(items: list of number)
+    if items.length > 1
+        set minVal = items[1]
+        set maxVal = items[1]
+        repeat each n in items
+            if n < minVal
+                minVal = n
+            end
+            if n > maxVal
+                maxVal = n
+            end
+        end
+
+        set span = maxVal - minVal + 1
+        set counts: list of number = []
+        repeat span times
+            counts.add(0)
+        end
+
+        repeat each n in items
+            counts[n - minVal + 1] += 1
+        end
+
+        set writePos = 1
+        repeat idx from 1 to span
+            set val = minVal + idx - 1
+            repeat counts[idx] times
+                items[writePos] = val
+                writePos += 1
+            end
+        end
+    end
+end
+
+# Utils
+do reverse(items: list of T)
+    set left = 1
+    set right = items.length
+    repeat while left < right 
+        items[left], items[right] = items[right], items[left]
+        left += 1
+        right -=1
+    end
+end
+
+do reversed(items: list of T): list of T
+    set out = items.copy()
+    reverse(out)
+    return out
+end
+
+do isSorted(items: list of T): bool
+    repeat i from 1 to items.length - 1
+        if items[i] > items[i + 1]
+            return false
+        end
+    end
+    return true
+end
+
+
+do search(items: list of T, target: T): number?
+    if isSorted(items)
+        return binarySearch(items, target)
+    end
+
+    repeat i from 1 to items.length
+        if items[i] == target
+            return i
+        end
+    end
+    return nothing
+end
+
+do binarySearch(items: list of T, target: T): number?
+    set low = 1
+    set high = items.length
+    repeat while low <= high
+        set mid = (low + high) // 2
+        if items[mid] == target
+            return mid
+        otherwise if items[mid] < target 
+            low = mid + 1
+        otherwise
+            high = mid - 1
+        end
+    end
+    return nothing
+end

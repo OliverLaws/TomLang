@@ -32,7 +32,7 @@ ParseExpr:
 ParseExprInner:
     push qword [rel TokPtr]
     push qword [rel Here]
-    call ParseOr
+    call ParsePipe
     IfTok "if", .Maybe
 .Done:
     add rsp, 16
@@ -54,7 +54,18 @@ ParseExprInner:
     mov rcx, [rsp + 16]
     call Unread
     call Advance
-    call ParseOr
+    call ParsePipe
+    mov rcx, [rsp]
+    call ElseIsNothing
+    test eax, eax
+    jz .NoBoxFirst
+    mov rcx, [rel ExprType]
+    cmp rcx, TNil
+    je .NoBoxFirst
+    mov edx, TNil
+    call UnionOf2
+    call CoerceTo
+.NoBoxFirst:
     push qword [rel ExprType]
     lea rcx, [rel PrimBranch]
     call EmitJump
@@ -79,11 +90,45 @@ ParseExprInner:
     add rsp, 8
     ret
 .Mismatch:
+    cmp rdx, TNil
+    je .ElseNil
+    cmp rax, TNil
+    je .FirstNil
     call Compatible
     test rax, rax
     jz TypeError
     mov [rel ExprType], rax
     jmp .Join
+.ElseNil:
+    push rax
+    mov rcx, rax
+    mov edx, TNil
+    call UnionHas
+    pop rcx
+    test eax, eax
+    jz TypeError
+    mov [rel ExprType], rcx
+    jmp .Join
+.FirstNil:
+    mov rcx, rdx
+    mov edx, TNil
+    call UnionOf2
+    call CoerceTo
+    jmp .Join
+
+ParsePipe:
+    call ParseOr
+.Loop:
+    IfTok "|>", .Pipe
+    ret
+.Pipe:
+    call Advance
+    mov rcx, [rel ExprType]
+    test rcx, rcx
+    jz TypeError
+    call PipeTarget
+    mov qword [rel LastVarRef], 0
+    jmp .Loop
 
 ParseOr:
     call ParseAnd
@@ -95,6 +140,13 @@ ParseOr:
     mov rax, [rel ExprType]
     cmp rax, TBool
     je .Logic
+    push rax
+    mov rcx, rax
+    call KindOfType
+    pop rcx
+    cmp rax, KUnion
+    je .Optional
+    mov rax, rcx
     cmp rax, TText
     je .Fallback
     call KindOfType
@@ -103,6 +155,7 @@ ParseOr:
     cmp rax, KMap
     je .Fallback
 .Logic:
+    mov qword [rel OrSeen], 1
     push qword [rel ExprType]
     CompilePrim PrimDup
     lea rcx, [rel PrimBranch0]
@@ -147,6 +200,44 @@ ParseOr:
     cmp rax, [rel ExprType]
     jne TypeError
     jmp .Loop
+.Optional:
+    mov edx, TNil
+    push rcx
+    call UnionHas
+    pop rcx
+    test eax, eax
+    jz TypeError
+    mov edx, TNil
+    call UnionWithout
+    push rax
+    CompilePrim PrimDup
+    lea rcx, [rel PrimBranch0]
+    call EmitJump
+    push rax
+    mov rax, [rsp + 8]
+    call KindOfType
+    cmp rax, KUnion
+    je .OptKeep
+    CompilePrim PrimUnbox
+.OptKeep:
+    lea rcx, [rel PrimBranch]
+    call EmitJump
+    pop rcx
+    push rax
+    mov rdx, [rel Here]
+    mov [rcx], rdx
+    CompilePrim PrimDrop
+    call Advance
+    call ParseAnd
+    mov rax, [rsp + 8]
+    call CoerceTo
+    pop rcx
+    mov rdx, [rel Here]
+    mov [rcx], rdx
+    pop rax
+    cmp rax, [rel ExprType]
+    jne TypeError
+    jmp .Loop
 .Hint:
     Fail ErrOrHint
 
@@ -157,6 +248,17 @@ ParseAnd:
     IfTok "&&", .Hint
     ret
 .And:
+    mov qword [rel AndSeen], 1
+    push qword [rel NarrowCount]
+    mov rax, [rel NarrowCandHere]
+    cmp rax, [rel Here]
+    jne .AndNoNarrow
+    cmp qword [rel NarrowCandVar], 0
+    je .AndNoNarrow
+    mov rcx, [rel NarrowCandVar]
+    mov rdx, [rel NarrowCandType]
+    call NarrowPush
+.AndNoNarrow:
     push qword [rel ExprType]
     CompilePrim PrimDup
     lea rcx, [rel PrimBranch0]
@@ -170,6 +272,8 @@ ParseAnd:
     mov [rcx], rdx
     pop rax
     call CheckLogic
+    pop rax
+    mov [rel NarrowCount], rax
     SetType TBool
     jmp .Loop
 .Hint:
@@ -179,6 +283,7 @@ ParseNot:
     IfTok "not", .Not
     jmp ParseCompare
 .Not:
+    mov qword [rel AndSeen], 1
     call Advance
     call ParseNot
     mov eax, TBool
@@ -190,6 +295,7 @@ ParseNot:
 
 ParseCompare:
     call ParseRange
+    IfTok "is", .IsType
     IfTok "==", .Eq
     IfTok "!=", .Ne
     IfTok "<=", .Le
@@ -200,7 +306,29 @@ ParseCompare:
     IfTok "not", .MaybeNotIn
     ret
 .Eq:
+    mov qword [rel NilCmpVar], 0
     call .Equal
+    mov rcx, [rel NilCmpVar]
+    test rcx, rcx
+    jz .EqNoNeg
+    push rax
+    push rcx
+    mov rcx, [rel NilCmpType]
+    mov edx, TNil
+    call UnionWithout
+    mov [rel NegCandType], rax
+    pop rcx
+    mov [rel NegCandVar], rcx
+    mov rax, [rel Here]
+    add rax, 8
+    mov [rel NegCandHere], rax
+    mov rax, [rel ExprDepth]
+    mov [rel NegCandDepth], rax
+    call NegAdd
+    pop rax
+.EqNoNeg:
+    cmp rax, 4
+    je .EqDone
     cmp rax, 2
     je .EqText
     cmp rax, 3
@@ -214,10 +342,33 @@ ParseCompare:
     ret
 .EqDec:
     CompilePrim PrimDEq
+.EqDone:
     SetType TBool
     ret
 .Ne:
+    mov qword [rel NilCmpVar], 0
     call .Equal
+    push rax
+    mov rcx, [rel NilCmpVar]
+    test rcx, rcx
+    jz .NeNoNarrow
+    mov rax, [rel NilCmpType]
+    push rcx
+    push rax
+    mov rcx, rax
+    mov edx, TNil
+    call UnionWithout
+    mov [rel NarrowCandType], rax
+    pop rax
+    pop rcx
+    mov [rel NarrowCandVar], rcx
+    mov rax, [rel Here]
+    add rax, 8
+    mov [rel NarrowCandHere], rax
+.NeNoNarrow:
+    pop rax
+    cmp rax, 4
+    je .NeUser
     cmp rax, 2
     je .NeText
     cmp rax, 3
@@ -235,12 +386,24 @@ ParseCompare:
     CompilePrim PrimDNotEq
     SetType TBool
     ret
+.NeUser:
+    CompileNum 0
+    CompilePrim PrimEq
+    SetType TBool
+    ret
 .Equal:
+    push qword [rel LastVarRef]
     push qword [rel ExprType]
     call Advance
     call ParseRange
     pop rax
+    TryOp "==", .EqUser
+    pop r8
     mov rdx, [rel ExprType]
+    cmp rax, TNil
+    je .NilCompare
+    cmp rdx, TNil
+    je .NilCompare
     cmp rax, rdx
     jne .Mixed
     cmp rax, TText
@@ -257,6 +420,20 @@ ParseCompare:
     pop rax
     je .IsInt
     jmp TypeError
+.EqUser:
+    add rsp, 8
+    mov eax, 4
+    ret
+.NilCompare:
+    mov [rel NilCmpVar], r8
+    mov [rel NilCmpType], rax
+    cmp rax, TNil
+    jne .NilOk
+    mov [rel NilCmpType], rdx
+    mov qword [rel NilCmpVar], 0
+.NilOk:
+    mov eax, 1
+    ret
 .Mixed:
     call NumericPair
 .IsDec:
@@ -269,27 +446,38 @@ ParseCompare:
     mov eax, 1
     ret
 .Le:
+    mov qword [rel OrderOp], 2
     lea rbx, [rel PrimLessEq]
     lea rsi, [rel PrimDLessEq]
     jmp .Order
 .Ge:
+    mov qword [rel OrderOp], 3
     lea rbx, [rel PrimGreaterEq]
     lea rsi, [rel PrimDGreaterEq]
     jmp .Order
 .Lt:
+    mov qword [rel OrderOp], 0
     lea rbx, [rel PrimLess]
     lea rsi, [rel PrimDLess]
     jmp .Order
 .Gt:
+    mov qword [rel OrderOp], 1
     lea rbx, [rel PrimGreater]
     lea rsi, [rel PrimDGreater]
 .Order:
     push rbx
     push rsi
+    push qword [rel OrderOp]
     push qword [rel ExprType]
     call Advance
     call ParseRange
     pop rax
+    pop rcx
+    push rax
+    call OrderOverload
+    test eax, eax
+    pop rax
+    jnz .OrderUser
     cmp rax, TText
     je .OrderText
     cmp rax, [rel ExprType]
@@ -309,6 +497,10 @@ ParseCompare:
     mov rcx, rsi
 .OrderEmit:
     call Compile
+    SetType TBool
+    ret
+.OrderUser:
+    add rsp, 16
     SetType TBool
     ret
 .OrderText:
@@ -364,9 +556,15 @@ ParseCompare:
     CompilePrim PrimTextHas
     ret
 .InMap:
-    cmp rbx, TText
+    mov rcx, [rel ExprType]
+    call KeyOf
+    cmp rbx, rax
     jne TypeError
-    CompilePrim PrimMapHas
+    mov rcx, [rel ExprType]
+    lea rdx, [rel PrimMapHas]
+    lea r8, [rel PrimMapHasInt]
+    call MapOp
+    SetType TBool
     ret
 .InList:
     mov rcx, [rel ExprType]
@@ -382,6 +580,65 @@ ParseCompare:
     ret
 .InListText:
     CompilePrim PrimListHasText
+    ret
+
+.IsType:
+    mov rcx, [rel TokPtr]
+.IsBack:
+    movzx eax, byte [rcx - 1]
+    cmp eax, ' '
+    je .IsPrev
+    cmp eax, 9
+    je .IsPrev
+    cmp eax, 10
+    je .IsNot
+    cmp eax, 13
+    je .IsNot
+    jmp .IsSame
+.IsPrev:
+    dec rcx
+    jmp .IsBack
+.IsNot:
+    ret
+.IsSame:
+    mov rax, [rel ExprType]
+    push qword [rel LastVarRef]
+    push rax
+    mov rcx, rax
+    call KindOfType
+    cmp rax, KUnion
+    jne TypeError
+    call Advance
+    call ParseTypeName
+    push rax
+    call Advance
+    mov rcx, [rsp + 8]
+    mov rdx, [rsp]
+    call UnionHas
+    test eax, eax
+    jz TypeError
+    CompilePrim PrimTagIs
+    mov rcx, [rsp]
+    call Compile
+    pop rdx
+    pop rax
+    pop rcx
+    test rcx, rcx
+    jz .IsDone
+    mov [rel NarrowCandVar], rcx
+    mov [rel NarrowCandType], rdx
+    mov [rel NegCandVar], rcx
+    mov rcx, rax
+    call UnionWithout
+    mov [rel NegCandType], rax
+    mov rax, [rel Here]
+    mov [rel NarrowCandHere], rax
+    mov [rel NegCandHere], rax
+    mov rax, [rel ExprDepth]
+    mov [rel NegCandDepth], rax
+    call NegAdd
+.IsDone:
+    SetType TBool
     ret
 
 ParseRange:
@@ -435,6 +692,7 @@ ParseSum:
     call Advance
     call ParseProduct
     pop rax
+    TryOp "+", .Loop
     mov rdx, [rel ExprType]
     cmp rax, TText
     je .Text
@@ -465,7 +723,7 @@ ParseSum:
     CompilePrim PrimConcat
     SetType TText
     jmp .Loop
-ArithOp .Sub, ParseProduct, PrimSub, PrimDSub
+ArithOp .Sub, ParseProduct, PrimSub, PrimDSub, "-"
     jmp .Loop
 
 ParseProduct:
@@ -476,13 +734,14 @@ ParseProduct:
     IfTok "/", .Div
     IfTok "%", .Mod
     ret
-ArithOp .Mul, ParsePower, PrimMul, PrimDMul
+ArithOp .Mul, ParsePower, PrimMul, PrimDMul, "*"
     jmp .Loop
 .FloorDiv:
     push qword [rel ExprType]
     call Advance
     call ParsePower
     pop rax
+    TryOp "//", .Loop
     call NumericPair
     cmp rax, TDec
     je .FloorDivDec
@@ -498,6 +757,7 @@ ArithOp .Mul, ParsePower, PrimMul, PrimDMul
     call Advance
     call ParsePower
     pop rax
+    TryOp "%", .Loop
     call NumericPair
     cmp rax, TDec
     je .ModDec
@@ -513,6 +773,7 @@ ArithOp .Mul, ParsePower, PrimMul, PrimDMul
     call Advance
     call ParsePower
     pop rax
+    TryOp "/", .Loop
     call NumericPair
     cmp rax, TDec
     je .DivEmit
@@ -527,7 +788,22 @@ ParsePower:
     call ParseAtom
     IfTok "^", .Pow
     ret
-NumOp .Pow, ParsePower, PrimPow, TNum
+.Pow:
+    push qword [rel ExprType]
+    call Advance
+    call ParsePower
+    pop rax
+    TryOp "^", .PowOver
+    call NumericPair
+    cmp rax, TDec
+    je .PowDec
+    CompilePrim PrimPow
+    SetType TNum
+    ret
+.PowDec:
+    CompilePrim PrimDPow
+    SetType TDec
+.PowOver:
     ret
 
 ParseAtom:
@@ -650,10 +926,16 @@ ParseAtom:
     push qword [rel ExprType]
     call Advance
     call ParseExpr
-    NeedType TText
+    mov rcx, [rsp]
+    call KeyOf
+    cmp rax, [rel ExprType]
+    jne TypeError
     Expect "]", ErrBracket
     call Advance
-    CompilePrim PrimMapGet
+    mov rcx, [rsp]
+    lea rdx, [rel PrimMapGet]
+    lea r8, [rel PrimMapGetInt]
+    call MapOp
 .ElemType:
     pop rcx
     call ElemOf
@@ -676,6 +958,14 @@ ParseAtom:
     IfTok "pop", .Pop
     IfTok "remove", .Remove
     IfTok "insert", .Insert
+    IfTok "join", .Join
+.TryMethod:
+    call MemberCall
+    test eax, eax
+    jz .NoMember
+    mov qword [rel LastVarRef], 0
+    jmp .Post
+.NoMember:
     Fail ErrMember
 .Copy:
     call NeedList
@@ -761,6 +1051,33 @@ ParseAtom:
 .MethodDone:
     mov qword [rel LastVarRef], 0
     jmp .Post
+.Join:
+    mov rax, [rel ExprType]
+    push rax
+    call KindOfType
+    pop rcx
+    cmp rax, KList
+    jne .TryMethod
+    call ElemOf
+    cmp rax, TText
+    jne .TryMethod
+    call Advance
+    Expect "(", ErrParen
+    call Advance
+    IfTok ")", .JoinEmpty
+    call ParseExpr
+    NeedType TText
+    Expect ")", ErrParen
+    jmp .JoinEmit
+.JoinEmpty:
+    mov rcx, [rel TokPtr]
+    xor edx, edx
+    call CompileText
+.JoinEmit:
+    call Advance
+    CompilePrim PrimJoin
+    SetType TText
+    jmp .MethodDone
 .Filter:
     mov ecx, 1
     jmp ListLoop
@@ -773,7 +1090,7 @@ ParseAtom:
     mov r8, [rel TokLen]
     call FindField
     cmp rax, -1
-    je .NoField
+    je .TryMethod
     push rdx
     push rax
     CompilePrim PrimGetField
@@ -797,7 +1114,15 @@ ParseAtom:
     cmp rax, KMap
     jne TypeError
 .LengthOk:
+    cmp qword [rel ExprType], TText
+    je .TextLength
     CompilePrim PrimLength
+    SetType TNum
+    mov qword [rel LastVarRef], 0
+    call Advance
+    jmp .Post
+.TextLength:
+    CompilePrim PrimTextLength
     SetType TNum
     mov qword [rel LastVarRef], 0
     call Advance
@@ -808,7 +1133,9 @@ ParseAtom:
     cmp rax, KMap
     jne TypeError
     CompilePrim PrimMapKeys
-    mov ecx, TText
+    mov rcx, [rel ExprType]
+    call KeyOf
+    mov rcx, rax
     call ListOf
     mov [rel ExprType], rax
     mov qword [rel LastVarRef], 0
@@ -824,7 +1151,15 @@ ParseAtom:
     call Advance
     Expect "(", ErrParen
     call Advance
+    mov rcx, [rsp + 8]
+    call ElemOf
+    push rax
+    push rax
+    call SetHint
     call ParseExpr
+    pop rax
+    pop rax
+    call CoerceElem
     Expect ")", ErrParen
     call Advance
     pop rbx

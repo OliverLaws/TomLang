@@ -3,7 +3,9 @@
 global PrimSayText
 extern Alloc
 extern MakeTextFrom
+extern Utf8Offset
 global PrimConcat
+global PrimJoin
 global PrimToText
 global PrimToNumber
 global PrimTextEq
@@ -526,18 +528,31 @@ PrimListSlice:
 PrimTextSlice:
     DPop rsi
     DPop rbx
-    mov rax, [r15 - 8]
     cmp rbx, 1
     jl TextSliceError
-    cmp rsi, [rax]
-    jg TextSliceError
-    mov rdx, rsi
-    sub rdx, rbx
-    inc rdx
-    jg .Sized
-    xor edx, edx
-.Sized:
-    lea rcx, [rax + 7 + rbx]
+    cmp rsi, rbx
+    jge .Range
+    mov rsi, rbx
+    dec rsi
+.Range:
+    mov rcx, [r15 - 8]
+    mov rdx, rbx
+    call Utf8Offset
+    cmp rax, -1
+    je TextSliceError
+    push rax
+    push rax
+    mov rcx, [r15 - 8]
+    lea rdx, [rsi + 1]
+    call Utf8Offset
+    pop rcx
+    pop rcx
+    cmp rax, -1
+    je TextSliceError
+    mov rdx, rax
+    sub rdx, rcx
+    mov rax, [r15 - 8]
+    lea rcx, [rax + 8 + rcx]
     call MakeTextFrom
     mov [r15 - 8], rax
     NEXT
@@ -551,4 +566,67 @@ PrimLength:
     DPop rax
     mov rax, [rax]
     DPush rax
+    NEXT
+
+PrimJoin:
+    mov rsi, [r15 - 16]
+    mov rdi, [r15 - 8]
+    mov rcx, [rsi]
+    mov r8, [rsi + 16]
+    xor eax, eax
+    xor edx, edx
+.Size:
+    cmp rdx, rcx
+    jae .Sized
+    mov r9, [r8 + rdx * 8]
+    add rax, [r9]
+    inc rdx
+    jmp .Size
+.Sized:
+    test rcx, rcx
+    jz .NoSep
+    dec rcx
+    imul rcx, [rdi]
+    add rax, rcx
+.NoSep:
+    push rax
+    push rax
+    lea rcx, [rax + 8]
+    call Alloc
+    mov rbx, rax
+    pop rax
+    pop rax
+    mov [rbx], rax
+    lea rax, [rbx + 8]
+    push rax
+    push 0
+.Copy:
+    mov rsi, [r15 - 16]
+    mov rdx, [rsp]
+    cmp rdx, [rsi]
+    jae .Done
+    test rdx, rdx
+    jz .Item
+    mov rdi, [r15 - 8]
+    lea rcx, [rdi + 8]
+    mov rdx, [rsp + 8]
+    mov r8, [rdi]
+    add [rsp + 8], r8
+    call MemCopy
+    mov rsi, [r15 - 16]
+    mov rdx, [rsp]
+.Item:
+    mov r8, [rsi + 16]
+    mov rdi, [r8 + rdx * 8]
+    lea rcx, [rdi + 8]
+    mov rdx, [rsp + 8]
+    mov r8, [rdi]
+    add [rsp + 8], r8
+    call MemCopy
+    inc qword [rsp]
+    jmp .Copy
+.Done:
+    add rsp, 16
+    sub r15, 8
+    mov [r15 - 8], rbx
     NEXT

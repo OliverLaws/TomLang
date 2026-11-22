@@ -3,9 +3,16 @@ ParsePrimary:
     mov [rel CurHintCount], rax
     mov rax, [rel HintPtr]
     mov [rel CurHintPtr], rax
+    mov rax, [rel HintFn]
+    mov [rel CurHintFn], rax
+    mov qword [rel HintFn], 0
+    mov rax, [rel HintType]
+    mov [rel CurHintType], rax
+    mov qword [rel HintType], 0
     mov qword [rel HintCount], 0
     cmp qword [rel TokLen], 0
     je .Missing
+    call PickHint
     call TryDotted
     test rax, rax
     jnz .Dotted
@@ -16,6 +23,7 @@ ParsePrimary:
     IfTok "true", .True
     IfTok "false", .False
     IfTok "error", .LastError
+    IfTok "nothing", .Nothing
     IfTok "ask", .Ask
     IfTok "random", .Random
     IfTok "number", .ToNumber
@@ -80,6 +88,10 @@ ParsePrimary:
     CompilePrim PrimLastError
     SetType TText
     jmp Advance
+.Nothing:
+    CompileNum 0
+    SetType TNil
+    jmp Advance
 .True:
     CompileNum 1
     SetType TBool
@@ -89,6 +101,8 @@ ParsePrimary:
     SetType TBool
     jmp Advance
 .Dotted:
+    cmp rdx, 8
+    je ConstructRecord
     cmp rdx, 4
     je .Func
     cmp rdx, 6
@@ -114,6 +128,8 @@ ParsePrimary:
     call FindWord
     test rax, rax
     jz .Unknown
+    cmp rdx, 8
+    je ConstructRecord
     cmp rdx, 4
     je .Func
     cmp rdx, 6
@@ -201,19 +217,21 @@ ParsePrimary:
     push rax
     call Advance
     IfTok "(", .GenericCall
-    Fail ErrGenericValue
+    pop rcx
+    call GenericValue
+    ret
 .GenericCall:
     pop rax
     mov r9d, 1
 .CallSetup:
-    sub rsp, 928
-    mov [rsp + 912], r9
+    sub rsp, 960
+    mov [rsp + 928], r9
     mov [rsp + 640], rax
     xor ecx, ecx
 .ClearBind:
     mov qword [rsp + 704 + rcx * 8], 0
     inc ecx
-    cmp ecx, 26
+    cmp ecx, 27
     jb .ClearBind
     mov qword [rsp + 648], 0
     mov qword [rsp + 656], 0
@@ -223,6 +241,24 @@ ParsePrimary:
     inc ecx
     cmp ecx, 16
     jb .ClearPos
+    mov rax, [rel RecvType]
+    mov [rsp + 944], rax
+    mov rcx, [rel RecvBare]
+    mov [rsp + 952], rcx
+    mov qword [rel RecvType], 0
+    mov qword [rel RecvBare], 0
+    test rax, rax
+    jz .NoRecv
+    mov qword [rsp], 1
+    mov qword [rsp + 648], 1
+    cmp qword [rsp + 928], 0
+    je .NoRecv
+    mov qword [rsp + 936], 0
+    mov [rel ExprType], rax
+    call CallUnify
+.NoRecv:
+    cmp qword [rsp + 952], 0
+    jne .BareCall
     call Advance
     mov rax, [rel Here]
     mov [rsp + 664], rax
@@ -248,7 +284,7 @@ ParsePrimary:
     pop rax
     mov rcx, [rel TokPtr]
     mov [rsp + rax * 8], rcx
-    mov [rsp + 920], rax
+    mov [rsp + 936], rax
     mov rdx, [rsp + 640]
     call ParamTypeOf
     call CallHint
@@ -270,7 +306,7 @@ ParsePrimary:
     inc qword [rsp + 656]
     mov rax, [rsp + 648]
     bts rax, 40
-    mov [rsp + 920], rax
+    mov [rsp + 936], rax
     mov rax, [rsp + 648]
     mov rdx, [rsp + 640]
     call ParamTypeOf
@@ -285,33 +321,49 @@ ParsePrimary:
     jne .Twice
     mov rcx, [rel TokPtr]
     mov [rsp + rax * 8], rcx
-    mov [rsp + 920], rax
+    mov [rsp + 936], rax
     inc qword [rsp + 648]
     mov rdx, [rsp + 640]
     call ParamTypeOf
     call CallHint
 .P1Parse:
     call ParseExpr
-    cmp qword [rsp + 912], 0
+    cmp qword [rsp + 928], 0
     je .P1Typed
     call CallUnify
 .P1Typed:
     IfTok ",", .P1Comma
     Expect ")", ErrParen
+    jmp .P1Done
+.BareCall:
+    mov rax, [rel Here]
+    mov [rsp + 664], rax
 .P1Done:
     mov rax, [rel TokPtr]
     mov [rsp + 672], rax
     mov rax, [rsp + 664]
     mov [rel Here], rax
     mov qword [rsp + 680], 0
-    cmp qword [rsp + 912], 0
-    je .P2Loop
+    cmp qword [rsp + 928], 0
+    je .P2Start
     call CallInstance
+.P2Start:
+    mov qword [rsp + 696], 0
+    call ArgOrder
+    test eax, eax
+    jz .P2Loop
+    mov qword [rsp + 696], 1
+    mov rax, [rsp + 128]
+    mov [rsp + 680], rax
+    jmp .P2Body
 .P2Loop:
     mov rax, [rsp + 680]
     mov rdx, [rsp + 640]
     cmp rax, [rdx - 16]
     jae .P2Done
+.P2Body:
+    mov rax, [rsp + 680]
+    mov rdx, [rsp + 640]
     mov rcx, [rsp + rax * 8]
     test rcx, rcx
     jnz .P2Given
@@ -334,6 +386,8 @@ ParsePrimary:
     call Compile
     jmp .P2Next
 .P2Given:
+    cmp rcx, 1
+    je .P2Recv
     push rcx
     call ParamTypeOf
     call SetHint
@@ -343,6 +397,12 @@ ParsePrimary:
     call ParseExpr
     mov rax, [rsp + 680]
     mov rdx, [rsp + 640]
+    call ParamTypeOf
+    call CheckArg
+    jmp .P2Next
+.P2Recv:
+    mov rcx, [rsp + 944]
+    mov [rel ExprType], rcx
     call ParamTypeOf
     call CheckArg
     jmp .P2Next
@@ -375,13 +435,56 @@ ParsePrimary:
     CompileNum [rsp + 656]
     CompilePrim PrimMakeList
 .P2Next:
+    cmp qword [rsp + 696], 0
+    jne .P2Ordered
     inc qword [rsp + 680]
     jmp .P2Loop
+.P2Ordered:
+    mov rax, [rsp + 696]
+    mov rdx, [rsp + 640]
+    cmp rax, [rdx - 16]
+    jae .P2Reorder
+    mov rcx, [rsp + 128 + rax * 8]
+    mov [rsp + 680], rcx
+    inc qword [rsp + 696]
+    jmp .P2Body
+.P2Reorder:
+    CompilePrim PrimReorder
+    mov rdx, [rsp + 640]
+    mov rcx, [rdx - 16]
+    call Compile
+    mov rdx, [rsp + 640]
+    mov rax, [rel Here]
+    mov rcx, [rdx - 16]
+.P2Space:
+    test rcx, rcx
+    jz .P2Fill
+    push rax
+    push rcx
+    xor ecx, ecx
+    call Compile
+    pop rcx
+    pop rax
+    dec rcx
+    jmp .P2Space
+.P2Fill:
+    xor ecx, ecx
+.P2FillLoop:
+    mov rdx, [rsp + 640]
+    cmp rcx, [rdx - 16]
+    jae .P2Done
+    mov r8, [rsp + 128 + rcx * 8]
+    mov [rax + r8 * 8], rcx
+    inc rcx
+    jmp .P2FillLoop
 .P2Done:
+    cmp qword [rsp + 952], 0
+    jne .P2Bare
     mov rcx, [rsp + 672]
     call Unread
     call Advance
     call Advance
+.P2Bare:
     mov rax, [rsp + 640]
     test qword [rax - SigFlags], 4
     jz .NoLink
@@ -391,7 +494,7 @@ ParsePrimary:
     mov rcx, [rsp + 640]
     call Compile
     mov rcx, [rsp + 640]
-    add rsp, 928
+    add rsp, 960
     mov rax, [rcx - 8]
     mov qword [rel VoidCall], 0
     test qword [rcx - SigFlags], 2
@@ -440,10 +543,30 @@ ParsePrimary:
 .List:
     call Advance
     IfTok "]", .EmptyList
+    call ScanFor
+    test rax, rax
+    jnz ListComp
+    xor eax, eax
+    mov rcx, [rel CurHintType]
+    test rcx, rcx
+    jz .ListNoHint
+    push rcx
+    call TypeKind
+    pop rcx
+    cmp rax, KList
+    mov eax, 0
+    jne .ListNoHint
+    call ElemOf
+.ListNoHint:
+    push rax
     push 0
     push 0
 .ListLoop:
+    mov rax, [rsp + 16]
+    call SetHint
     call ParseExpr
+    mov rax, [rsp + 16]
+    call CoerceElem
     mov rax, [rel ExprType]
     test rax, rax
     jz TypeError
@@ -457,7 +580,7 @@ ParsePrimary:
     mov [rsp], rax
 .ElemOk:
     inc qword [rsp + 8]
-    cmp qword [rsp + 8], 4000
+    cmp qword [rsp + 8], 200000
     ja .LongList
     IfTok ",", .ListComma
     Expect "]", ErrBracket
@@ -465,6 +588,7 @@ ParsePrimary:
     call Advance
     pop rbx
     pop rsi
+    add rsp, 8
     CompileNum rsi
     CompilePrim PrimMakeList
     mov rcx, rbx
@@ -481,6 +605,15 @@ ParsePrimary:
     xor ecx, ecx
     call ListOf
     mov [rel ExprType], rax
+    mov rcx, [rel CurHintType]
+    test rcx, rcx
+    jz Advance
+    push rcx
+    call TypeKind
+    pop rcx
+    cmp rax, KList
+    jne Advance
+    mov [rel ExprType], rcx
     jmp Advance
 .Brace:
     call Advance
@@ -488,6 +621,42 @@ ParsePrimary:
     mov rax, [rel TokPtr]
     cmp byte [rax], '"'
     je .MapLiteral
+    cmp byte [rax], '-'
+    je .MapLiteral
+    movzx ecx, byte [rax]
+    sub ecx, '0'
+    cmp ecx, 9
+    jbe .MapLiteral
+    IfTok "true", .MapLiteral
+    IfTok "false", .MapLiteral
+    IfTok "[", .MapLiteral
+    call IsNameStart
+    test eax, eax
+    jz RecordLiteral
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    call LookupVar
+    test rax, rax
+    jz .BraceKind
+    mov rcx, rax
+    call TypeOf
+    call KindOfType
+    cmp rax, KEnum
+    je .MapLiteral
+    jmp RecordLiteral
+.BraceKind:
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    call FindWord
+    test rax, rax
+    jz RecordLiteral
+    cmp rdx, 6
+    je .MapLiteral
+    cmp rdx, 5
+    jne RecordLiteral
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    call LookupVar
     jmp RecordLiteral
 .EmptyMap:
     CompileNum 0
@@ -495,16 +664,69 @@ ParsePrimary:
     xor ecx, ecx
     call MapOf
     mov [rel ExprType], rax
+    mov rcx, [rel CurHintType]
+    test rcx, rcx
+    jz Advance
+    push rcx
+    call TypeKind
+    pop rcx
+    cmp rax, KMap
+    jne Advance
+    mov [rel ExprType], rcx
     jmp Advance
 .MapLiteral:
+    xor eax, eax
+    mov rcx, [rel CurHintType]
+    test rcx, rcx
+    jz .MapNoHint
+    push rcx
+    call TypeKind
+    pop rcx
+    cmp rax, KMap
+    mov eax, 0
+    jne .MapNoHint
+    call ElemOf
+.MapNoHint:
+    push rax
+    push 0
     push 0
     push 0
 .MapLoop:
+    IfTok "[", .BracketKey
     call ParseExpr
-    NeedType TText
-    Expect ":", ErrMapColon
+    jmp .KeyParsed
+.BracketKey:
     call Advance
     call ParseExpr
+    Expect "]", ErrBracket
+    call Advance
+.KeyParsed:
+    mov rax, [rel ExprType]
+    cmp rax, TText
+    je .KeyOk
+    cmp rax, TNum
+    je .KeyOk
+    cmp rax, TBool
+    je .KeyOk
+    call KindOfType
+    cmp rax, KEnum
+    jne TypeError
+    mov rax, [rel ExprType]
+.KeyOk:
+    mov rdx, [rsp + 16]
+    test rdx, rdx
+    jz .KeyFirst
+    cmp rax, rdx
+    jne TypeError
+.KeyFirst:
+    mov [rsp + 16], rax
+    Expect ":", ErrMapColon
+    call Advance
+    mov rax, [rsp + 24]
+    call SetHint
+    call ParseExpr
+    mov rax, [rsp + 24]
+    call CoerceElem
     mov rax, [rel ExprType]
     test rax, rax
     jz TypeError
@@ -518,7 +740,7 @@ ParsePrimary:
     mov [rsp], rax
 .MapOk:
     inc qword [rsp + 8]
-    cmp qword [rsp + 8], 2000
+    cmp qword [rsp + 8], 200000
     ja .LongList
     IfTok ",", .MapComma
     Expect "}", ErrBraceClose
@@ -526,10 +748,19 @@ ParsePrimary:
     call Advance
     pop rbx
     pop rsi
+    pop rdi
+    add rsp, 8
     CompileNum rsi
+    cmp rdi, TText
+    je .TextMap
+    CompilePrim PrimMakeMapInt
+    jmp .MapMade
+.TextMap:
     CompilePrim PrimMakeMap
+.MapMade:
     mov rcx, rbx
-    call MapOf
+    mov rdx, rdi
+    call MapKeyed
     mov [rel ExprType], rax
     ret
 .MapComma:
@@ -542,6 +773,9 @@ ParsePrimary:
     call Advance
     CompileNum 0
     call ParsePower
+    call TryNegate
+    test eax, eax
+    jnz .NegDone
     mov rax, [rel ExprType]
     cmp rax, TDec
     je .NegDec
@@ -550,6 +784,7 @@ ParsePrimary:
     ret
 .NegDec:
     CompilePrim PrimDSub
+.NegDone:
     ret
 .Ask:
     call Advance
@@ -668,10 +903,14 @@ ParsePrimary:
 .Missing:
     Fail ErrExpect
 .NestValue:
-    Fail ErrNestValue
+    pop rax
+    jmp EmitNestValue
+
 .Unknown:
-    cmp qword [rel PreScanActive], 0
-    jne .NoForward
+    IfTok "here", .Here
+    IfTok "mainFolder", .MainFolder
+    cmp qword [rel PreScanActive], MaxPre
+    jae .NoForward
     mov rcx, [rel TokPtr]
     mov rdx, [rel TokLen]
     cmp byte [rcx + rdx], '('
@@ -687,9 +926,25 @@ ParsePrimary:
     cmp rdx, 7
     je .Generic
 .NoForward:
+    cmp qword [rel InFn], 0
+    je .NoForwardVar
+    cmp qword [rel PreScanActive], MaxPre
+    jae .NoForwardVar
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    call TryForwardVar
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    call LookupVar
+    test rax, rax
+    jnz .Var
+.NoForwardVar:
     call CaptureName
     test rax, rax
     jnz .Var
+    call LibraryPrefix
+    test eax, eax
+    jnz .NoMember
     push qword [rel TokPtr]
     push qword [rel TokLen]
     call Advance
@@ -706,8 +961,35 @@ ParsePrimary:
     FailTok ErrNotExist
 .Captured:
     FailTok ErrCapture
+.Here:
+    mov rcx, [rel CurFile]
+    jmp .Folder
+.MainFolder:
+    xor ecx, ecx
+.Folder:
+    call FolderText
+    SetType TText
+    mov qword [rel LastVarRef], 0
+    jmp Advance
+.NoMember:
+    call Advance
+    call Advance
+    FailTok ErrLibMember
 
 RecordLiteral:
+    mov rax, [rel CurHintType]
+    test rax, rax
+    jz .NoHint
+    push rax
+    call KindOfType
+    pop rcx
+    cmp rax, KRec
+    je .Hinted
+.NoHint:
+    xor ecx, ecx
+.Hinted:
+    push rcx
+    push 1
     push qword [rel TempTop]
     push 0
 .Loop:
@@ -733,7 +1015,32 @@ RecordLiteral:
     call Advance
     Expect ":", ErrRecordColon
     call Advance
+    xor eax, eax
+    mov rcx, [rsp + 32]
+    test rcx, rcx
+    jz .FieldHint
+    mov r8, [rsp]
+    mov rdx, [r8]
+    mov r8, [r8 + 8]
+    call FindField
+    cmp rax, -1
+    jne .HintFound
+    mov qword [rsp + 24], 0
+    xor eax, eax
+    jmp .FieldHint
+.HintFound:
+    mov rax, rdx
+.FieldHint:
+    push rax
+    push rax
+    call SetHint
     call ParseExpr
+    pop rax
+    pop rax
+    test rax, rax
+    jz .FieldParsed
+    call CheckArg
+.FieldParsed:
     pop r8
     mov rax, [rel ExprType]
     test rax, rax
@@ -743,10 +1050,21 @@ RecordLiteral:
     Expect "}", ErrBraceClose
 .Finish:
     call Advance
+    mov rbx, [rsp + 24]
+    test rbx, rbx
+    jz .Intern
+    cmp qword [rsp + 16], 0
+    je .Intern
+    mov rcx, rbx
+    call FieldCount
+    cmp rax, [rsp]
+    je .Interned
+.Intern:
     mov rcx, [rsp]
     mov rdx, [rsp + 8]
     call InternRecord
     mov rbx, rax
+.Interned:
     CompilePrim PrimMakeRecord
     mov rcx, [rsp]
     call Compile
@@ -770,6 +1088,7 @@ RecordLiteral:
     pop rax
     pop rax
     mov [rel TempTop], rax
+    add rsp, 16
     ret
 .Comma:
     call Advance
@@ -829,3 +1148,164 @@ FindSpecColon:
     mov rax, rdx
 .Found:
     ret
+
+ArgOrder:
+    mov rdx, [rsp + 8 + 640]
+    test qword [rdx - SigFlags], 1
+    jnz .No
+    mov r9, [rdx - 16]
+    xor r8d, r8d
+    xor r10d, r10d
+    xor r11d, r11d
+.Check:
+    cmp r8, r9
+    jae .Checked
+    mov rax, [rsp + 8 + r8 * 8]
+    test rax, rax
+    jz .CheckNext
+    cmp rax, r10
+    jae .InOrder
+    mov r11d, 1
+.InOrder:
+    mov r10, rax
+.CheckNext:
+    inc r8
+    jmp .Check
+.Checked:
+    test r11, r11
+    jz .No
+    xor ecx, ecx
+    xor r10d, r10d
+.Pick:
+    mov r11, -1
+    mov rax, -1
+    xor r8d, r8d
+.Scan:
+    cmp r8, r9
+    jae .Picked
+    mov rdx, [rsp + 8 + r8 * 8]
+    test rdx, rdx
+    jz .ScanNext
+    cmp rdx, r10
+    jbe .ScanNext
+    cmp rdx, rax
+    jae .ScanNext
+    mov rax, rdx
+    mov r11, r8
+.ScanNext:
+    inc r8
+    jmp .Scan
+.Picked:
+    cmp r11, -1
+    je .Defaults
+    mov [rsp + 8 + 128 + rcx * 8], r11
+    inc rcx
+    mov r10, rax
+    jmp .Pick
+.Defaults:
+    xor r8d, r8d
+.DefLoop:
+    cmp r8, r9
+    jae .Yes
+    cmp qword [rsp + 8 + r8 * 8], 0
+    jne .DefNext
+    mov [rsp + 8 + 128 + rcx * 8], r8
+    inc rcx
+.DefNext:
+    inc r8
+    jmp .DefLoop
+.Yes:
+    mov eax, 1
+    ret
+.No:
+    xor eax, eax
+    ret
+
+GenericValue:
+    push rbx
+    push r12
+    push r13
+    sub rsp, 224
+    mov r12, rcx
+    mov r13, [rel CurHintFn]
+    test r13, r13
+    jz .NoHint
+    xor ecx, ecx
+.Clear:
+    mov qword [rsp + rcx * 8], 0
+    inc ecx
+    cmp ecx, 27
+    jb .Clear
+    mov rbx, rsp
+    mov rax, r13
+    shl rax, 5
+    lea rdx, [rel TypeTable]
+    add rax, rdx
+    mov rcx, [rax + 16]
+    cmp rcx, [r12 - 16]
+    jne .Mismatch
+    xor ecx, ecx
+.Params:
+    cmp rcx, [r12 - 16]
+    jae .Ret
+    push rcx
+    push rcx
+    mov rax, rcx
+    mov rdx, r12
+    call ParamTypeOf
+    mov rcx, rax
+    mov rax, r13
+    shl rax, 5
+    lea rdx, [rel TypeTable]
+    mov rdx, [rdx + rax + 24]
+    mov rax, [rsp]
+    mov rdx, [rdx + rax * 8]
+    call Unify
+    pop rcx
+    pop rcx
+    inc rcx
+    jmp .Params
+.Ret:
+    mov rcx, [r12 - 8]
+    mov rax, r13
+    shl rax, 5
+    lea rdx, [rel TypeTable]
+    mov rdx, [rdx + rax + 8]
+    call Unify
+    mov qword [rel SubstFail], 0
+    xor ecx, ecx
+.Check:
+    mov rax, rcx
+    push rcx
+    push rcx
+    mov rdx, r12
+    call ParamTypeOf
+    call Subst
+    pop rcx
+    pop rcx
+    inc rcx
+    cmp rcx, [r12 - 16]
+    jb .Check
+    cmp qword [rel SubstFail], 0
+    jne .NoHint
+    mov rcx, r12
+    mov rdx, rsp
+    call GetInstance
+    push rax
+    push rax
+    CompilePrim PrimLit
+    mov rcx, [rsp]
+    call Compile
+    pop rcx
+    pop rcx
+    call FuncTypeOfSig
+    mov [rel ExprType], rax
+    add rsp, 224
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.Mismatch:
+    Fail ErrArgType
+.NoHint:
+    Fail ErrGenericValue

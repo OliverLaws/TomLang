@@ -147,6 +147,8 @@ DllWord:
     cmp qword [rel OpenBlocks], 0
     jne .Where
     call Advance
+    mov qword [rel FfiPtrMode], 0
+    IfTok "address", .PtrMode
     mov rcx, [rel TokPtr]
     mov rdx, [rel TokLen]
     cmp rdx, 3
@@ -161,6 +163,10 @@ DllWord:
     test rax, rax
     jz .NoLib
     mov [rel FfiLib], rax
+    jmp .Line
+.PtrMode:
+    mov qword [rel FfiPtrMode], 1
+    mov qword [rel FfiLib], 0
 .Line:
     call Advance
     cmp qword [rel TokLen], 0
@@ -172,6 +178,9 @@ DllWord:
     call IsNameStart
     test eax, eax
     jz .BadFn
+    xor eax, eax
+    cmp qword [rel FfiPtrMode], 0
+    jne .HaveProc
     call DllAlias
     call ZeroName
     mov rdx, rax
@@ -179,6 +188,7 @@ DllWord:
     call SysGetProc
     test rax, rax
     jz .NoProc
+.HaveProc:
     mov [rel FfiProc], rax
     mov rax, [rel Here]
     mov [rel FfiSavedHere], rax
@@ -201,6 +211,14 @@ DllWord:
     mov rcx, [rel FfiEntry]
     mov [rcx + 8], rax
     mov qword [rel FfiArgc], 0
+    cmp qword [rel FfiPtrMode], 0
+    je .NoAddrParam
+    mov r8, [rel FfiSig]
+    lea rax, [rel AddressName]
+    mov [r8 - SigName], rax
+    mov qword [r8 - SigName - 8], 7
+    mov qword [r8 - 24], TNum
+.NoAddrParam:
     call Advance
     Expect "(", ErrParen
     call Advance
@@ -219,6 +237,7 @@ DllWord:
     pop rdx
     mov r8, [rel FfiSig]
     mov r9, rbx
+    add r9, [rel FfiPtrMode]
     shl r9, 4
     neg r9
     mov [r8 - SigName + r9], rax
@@ -239,6 +258,7 @@ DllWord:
 .ParamSet:
     mov r8, [rel FfiSig]
     mov r9, rbx
+    add r9, [rel FfiPtrMode]
     shl r9, 3
     neg r9
     mov [r8 - 24 + r9], rax
@@ -250,6 +270,7 @@ DllWord:
 .ParamsDone:
     mov r8, [rel FfiSig]
     mov rax, [rel FfiArgc]
+    add rax, [rel FfiPtrMode]
     mov [r8 - 16], rax
     mov qword [r8 - 8], 0
     mov qword [rel FfiRet], 0
@@ -270,7 +291,13 @@ DllWord:
     call Advance
     call Advance
 .EmitCall:
+    cmp qword [rel FfiPtrMode], 0
+    je .Direct
+    CompilePrim PrimFfiCallPtr
+    jmp .Cells
+.Direct:
     CompilePrim PrimFfiCall
+.Cells:
     mov rcx, [rel FfiProc]
     call Compile
     mov rcx, [rel FfiArgc]

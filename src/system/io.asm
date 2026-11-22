@@ -29,6 +29,20 @@ extern FfiClass
 extern FfiN
 extern FfiFinish
 extern LoadLibraryA
+extern AddVectoredExceptionHandler
+extern SetConsoleOutputCP
+extern SetConsoleCP
+extern GetConsoleMode
+extern SetConsoleMode
+extern GetProcessHeap
+extern HeapAlloc
+extern HeapFree
+extern GetCurrentDirectoryA
+extern MemGuard
+extern MemFault
+global SysMemAlloc
+global SysMemFree
+global SysCurrentDir
 extern GetProcAddress
 extern GetStdHandle
 extern WriteFile
@@ -42,6 +56,7 @@ extern GetFileSizeEx
 extern GetModuleFileNameA
 
 section .bss
+ProcHeap resq 1
 StdOut    resq 1
 StdIn     resq 1
 Written   resq 1
@@ -75,6 +90,78 @@ InitIO:
     mov rcx, -10
     call GetStdHandle
     mov [rel StdIn], rax
+    mov ecx, 65001
+    call SetConsoleOutputCP
+    mov ecx, 65001
+    call SetConsoleCP
+    mov rcx, [rel StdOut]
+    lea rdx, [rsp + 48]
+    mov dword [rdx], 0
+    call GetConsoleMode
+    test eax, eax
+    jz .NoVT
+    mov edx, [rsp + 48]
+    or edx, 4
+    mov rcx, [rel StdOut]
+    call SetConsoleMode
+.NoVT:
+    mov ecx, 1
+    lea rdx, [rel FaultHandler]
+    call AddVectoredExceptionHandler
+    call GetProcessHeap
+    mov [rel ProcHeap], rax
+    mov rsp, rbp
+    pop rbp
+    ret
+
+FaultHandler:
+    mov rax, [rcx]
+    cmp dword [rax], 0xC0000005
+    jne .Search
+    cmp byte [rel MemGuard], 0
+    je .Search
+    mov rax, [rcx + 8]
+    lea rdx, [rel MemFault]
+    mov [rax + 0xF8], rdx
+    mov eax, -1
+    ret
+.Search:
+    xor eax, eax
+    ret
+
+SysMemAlloc:
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 64
+    mov r8, rcx
+    mov rcx, [rel ProcHeap]
+    mov edx, 8
+    call HeapAlloc
+    mov rsp, rbp
+    pop rbp
+    ret
+
+SysMemFree:
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 64
+    mov r8, rcx
+    mov rcx, [rel ProcHeap]
+    xor edx, edx
+    call HeapFree
+    mov rsp, rbp
+    pop rbp
+    ret
+
+SysCurrentDir:
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 64
+    xchg rcx, rdx
+    call GetCurrentDirectoryA
     mov rsp, rbp
     pop rbp
     ret

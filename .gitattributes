@@ -4,6 +4,5 @@
 *.vsix binary
 *.exe binary
 
-*.tom linguist-detectable=true
-*.tom linguist-language=Ruby
+*.inc linguist-language=Assembly
 TestScripts/* linguist-vendored

@@ -1,6 +1,12 @@
 %include "macros.inc"
 
 global RegisterNatives
+global MemGuard
+global MemFault
+extern SysMemAlloc
+extern SysMemFree
+global PrimFfiCallPtr
+extern PrimFfiCall
 global FfiPrepare
 global CallbackArg
 global CallbackResult
@@ -59,6 +65,9 @@ FfiHidden resq 1
 FfiPack resq 2
 ThunkCache resq 3 * 256
 ThunkCount resq 1
+MemList resq 1
+MemCount resq 1
+MemCap resq 1
 ThunkMem resq 1
 ThunkTop resq 1
 
@@ -67,11 +76,18 @@ ErrThunks db "too many different functions given to DLLs (256 at most)"
 ErrThunksLen equ $ - ErrThunks
 ErrMemSize    db "memory needs a size from 1 to 1000000000"
 ErrMemSizeLen equ $ - ErrMemSize
+ErrBadAddr db "can't read or write memory at that address"
+ErrBadAddrLen equ $ - ErrBadAddr
+ErrFreeMem db "freeMemory needs an address that came from memory()"
+ErrFreeMemLen equ $ - ErrFreeMem
+MemGuard db 0
 
 align 8
 NativeTable:
     NativeFn "memory", PrimMemory, TNum, 1
     Param TNum, "size"
+    NativeFn "freeMemory", PrimFreeMemory, TNone, 1
+    Param TNum, "address"
     NativeFn "readByte", PrimReadByte, TNum, 1
     Param TNum, "address"
     NativeFn "writeByte", PrimWriteByte, TNone, 2
@@ -112,6 +128,8 @@ NativeTable:
     Param TNum, "from"
     Param TNum, "to"
     Param TNum, "count"
+    NativeFn "byteLength", PrimByteLength, TNum, 1
+    Param TText, "source"
     dq 0
 
 MinusOneThunk:
@@ -171,6 +189,13 @@ RegisterNatives:
 .ParamsDone:
     mov rcx, [rbx]
     call Compile
+    cmp qword [rbx + 8], TNone
+    jne .HasResult
+    lea rcx, [rel PrimLit]
+    call Compile
+    xor ecx, ecx
+    call Compile
+.HasResult:
     lea rcx, [rel PrimExit]
     call Compile
     mov rax, [rel Here]
@@ -185,13 +210,130 @@ RegisterNatives:
     pop rbx
     ret
 
+MemTrack:
+    push rbx
+    mov rbx, rcx
+    mov rax, [rel MemCount]
+    cmp rax, [rel MemCap]
+    jb .Room
+    mov rcx, [rel MemCap]
+    shl rcx, 1
+    jnz .Grow
+    mov ecx, 256
+.Grow:
+    push rcx
+    push rcx
+    shl rcx, 3
+    call PermAlloc
+    pop rcx
+    pop rcx
+    mov rdx, [rel MemList]
+    xor r8d, r8d
+.Copy:
+    cmp r8, [rel MemCount]
+    jae .Copied
+    mov r9, [rdx + r8 * 8]
+    mov [rax + r8 * 8], r9
+    inc r8
+    jmp .Copy
+.Copied:
+    mov [rel MemList], rax
+    mov [rel MemCap], rcx
+.Room:
+    mov rax, [rel MemCount]
+    mov rdx, [rel MemList]
+    mov [rdx + rax * 8], rbx
+    inc qword [rel MemCount]
+    pop rbx
+    ret
+
+MemUntrack:
+    xor eax, eax
+    mov rdx, [rel MemList]
+    xor r8d, r8d
+.Find:
+    cmp r8, [rel MemCount]
+    jae .No
+    cmp [rdx + r8 * 8], rcx
+    je .Found
+    inc r8
+    jmp .Find
+.Found:
+    dec qword [rel MemCount]
+    mov r9, [rel MemCount]
+    mov r9, [rdx + r9 * 8]
+    mov [rdx + r8 * 8], r9
+    mov eax, 1
+.No:
+    ret
+
+MemFault:
+    mov byte [rel MemGuard], 0
+    lea rcx, [rel ErrBadAddr]
+    mov edx, ErrBadAddrLen
+    jmp Abort
+
+PrimFreeMemory:
+    DPop rcx
+    test rcx, rcx
+    jz .Done
+    push rcx
+    push rcx
+    call MemUntrack
+    pop rcx
+    pop rcx
+    test eax, eax
+    jz .Bad
+    call SysMemFree
+    test rax, rax
+    jz .Bad
+.Done:
+    NEXT
+.Bad:
+    lea rcx, [rel ErrFreeMem]
+    mov edx, ErrFreeMemLen
+    jmp Abort
+
+PrimFfiCallPtr:
+    mov rcx, [r14 + 8]
+    lea rax, [rcx * 8 + 8]
+    mov rdx, r15
+    sub rdx, rax
+    mov rax, [rdx]
+    cmp rax, 65536
+    jb .BadAddr
+    mov [r14], rax
+.Shift:
+    test rcx, rcx
+    jz .Shifted
+    mov r8, [rdx + 8]
+    mov [rdx], r8
+    add rdx, 8
+    dec rcx
+    jmp .Shift
+.Shifted:
+    sub r15, 8
+    jmp PrimFfiCall
+.BadAddr:
+    lea rcx, [rel ErrBadAddr]
+    mov edx, ErrBadAddrLen
+    jmp Abort
+
 PrimMemory:
     DPop rcx
     cmp rcx, 1
     jl .Bad
     cmp rcx, 1000000000
     jg .Bad
-    call PermAlloc
+    call SysMemAlloc
+    test rax, rax
+    jz .Bad
+    push rax
+    push rax
+    mov rcx, rax
+    call MemTrack
+    pop rax
+    pop rax
     DPush rax
     NEXT
 .Bad:
@@ -200,81 +342,106 @@ PrimMemory:
     jmp Abort
 
 PrimReadByte:
+    mov byte [rel MemGuard], 1
     DPop rax
     movzx eax, byte [rax]
     DPush rax
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimWriteByte:
+    mov byte [rel MemGuard], 1
     DPop rdx
     DPop rax
     mov [rax], dl
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimRead16:
+    mov byte [rel MemGuard], 1
     DPop rax
     movzx eax, word [rax]
     DPush rax
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimWrite16:
+    mov byte [rel MemGuard], 1
     DPop rdx
     DPop rax
     mov [rax], dx
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimRead32:
+    mov byte [rel MemGuard], 1
     DPop rax
     mov eax, [rax]
     DPush rax
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimWrite32:
+    mov byte [rel MemGuard], 1
     DPop rdx
     DPop rax
     mov [rax], edx
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimRead64:
+    mov byte [rel MemGuard], 1
     DPop rax
     mov rax, [rax]
     DPush rax
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimWrite64:
+    mov byte [rel MemGuard], 1
     DPop rdx
     DPop rax
     mov [rax], rdx
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimReadFloat:
+    mov byte [rel MemGuard], 1
     DPop rax
     cvtss2sd xmm0, [rax]
     movq rax, xmm0
     DPush rax
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimWriteFloat:
+    mov byte [rel MemGuard], 1
     DPop rdx
     DPop rax
     movq xmm0, rdx
     cvtsd2ss xmm0, xmm0
     movd [rax], xmm0
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimReadDouble:
+    mov byte [rel MemGuard], 1
     DPop rax
     mov rax, [rax]
     DPush rax
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimWriteDouble:
+    mov byte [rel MemGuard], 1
     DPop rdx
     DPop rax
     mov [rax], rdx
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimReadText:
+    mov byte [rel MemGuard], 1
     DPop rdx
     DPop rcx
     test rdx, rdx
@@ -288,18 +455,28 @@ PrimReadText:
 .Have:
     call MakeTextFrom
     DPush rax
+    mov byte [rel MemGuard], 0
     NEXT
 
 PrimWriteText:
+    mov byte [rel MemGuard], 1
     DPop rsi
     DPop rdi
     mov rcx, [rsi]
     add rsi, 8
     rep movsb
     mov byte [rdi], 0
+    mov byte [rel MemGuard], 0
+    NEXT
+
+PrimByteLength:
+    mov rax, [r15 - 8]
+    mov rax, [rax]
+    mov [r15 - 8], rax
     NEXT
 
 PrimCopyBytes:
+    mov byte [rel MemGuard], 1
     DPop rcx
     DPop rdi
     DPop rsi
@@ -307,6 +484,7 @@ PrimCopyBytes:
     jle .Done
     rep movsb
 .Done:
+    mov byte [rel MemGuard], 0
     NEXT
 
 StructToC:
@@ -632,6 +810,11 @@ FfiFinish:
     je .UInt32
     cmp rcx, 7
     je .Float
+    test rcx, rcx
+    jnz .Unknown
+    mov qword [r15], 0
+    add r15, 8
+.Unknown:
     NEXT
 .Struct:
     mov rdx, rcx
@@ -826,7 +1009,7 @@ CallbackResult:
     mov rcx, [rsi]
     inc rcx
     push rsi
-    call Alloc
+    call PermAlloc
     pop rsi
     mov rdi, rax
     mov rcx, [rsi]

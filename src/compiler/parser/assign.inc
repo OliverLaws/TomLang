@@ -59,6 +59,78 @@ SayWord:
     call EmitSay
     jmp Pushback
 
+FuseIncrement:
+    mov r8, [rel Here]
+    mov r9, [rel CompoundHere]
+    mov rax, r8
+    sub rax, r9
+    cmp rax, 40
+    jne .No
+    lea rcx, [rel PrimLit]
+    cmp [r9 + 16], rcx
+    jne .No
+    mov rdx, [r9 + 32]
+    lea rcx, [rel PrimAdd]
+    cmp rdx, rcx
+    je .Add
+    lea rcx, [rel PrimSub]
+    cmp rdx, rcx
+    jne .No
+    mov rax, [r9 + 24]
+    neg rax
+    jmp .Have
+.Add:
+    mov rax, [r9 + 24]
+.Have:
+    mov rdx, [r9]
+    lea rcx, [rel PrimGetG]
+    cmp rdx, rcx
+    je .Global
+    lea rcx, [rel PrimLocalGet]
+    cmp rdx, rcx
+    jne .No
+    lea rcx, [rel PrimIncL]
+    jmp .Write
+.Global:
+    lea rcx, [rel PrimIncG]
+.Write:
+    mov [r9], rcx
+    mov [r9 + 16], rax
+    add r9, 24
+    mov [rel Here], r9
+    mov eax, 1
+    ret
+.No:
+    xor eax, eax
+    ret
+
+TakeForwardVar:
+    xor eax, eax
+    xor edx, edx
+.Loop:
+    cmp rdx, [rel ForwardVarCount]
+    jae .No
+    lea r8, [rel ForwardVars]
+    cmp [r8 + rdx * 8], rcx
+    je .Yes
+    inc rdx
+    jmp .Loop
+.Yes:
+    mov qword [r8 + rdx * 8], 0
+    mov eax, 1
+.No:
+    ret
+
+NoteForwardVar:
+    mov rdx, [rel ForwardVarCount]
+    cmp rdx, 256
+    jae .Full
+    lea r8, [rel ForwardVars]
+    mov [r8 + rdx * 8], rax
+    inc qword [rel ForwardVarCount]
+.Full:
+    ret
+
 FailWord:
     call Advance
     call ParseExpr
@@ -73,11 +145,35 @@ ByeWord:
 
 AssignStmt:
     call Advance
+    call TryDotted
+    test rax, rax
+    jz .Plain
+    cmp rdx, 5
+    je .Const
+    cmp rdx, 3
+    jne .Unknown
+    push rax
+    call Advance
+    jmp AssignTail
+.Plain:
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    call LookupVar
+    test rax, rax
+    jnz .Found
+    cmp qword [rel InFn], 0
+    je .Unknown
+    cmp qword [rel PreScanActive], MaxPre
+    jae .Unknown
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    call TryForwardVar
     mov rcx, [rel TokPtr]
     mov rdx, [rel TokLen]
     call LookupVar
     test rax, rax
     jz .Unknown
+.Found:
     test rdx, rdx
     jnz .Const
     push rax
@@ -156,6 +252,15 @@ SetWord:
 .Resolved:
     test rax, rax
     jz .Create
+    push rax
+    push rdx
+    mov rcx, rax
+    call TakeForwardVar
+    mov rcx, rax
+    pop rdx
+    pop rax
+    test rcx, rcx
+    jnz .Have
     cmp qword [rel MakingConst], 0
     jne .Exists
     test rdx, rdx
@@ -301,6 +406,8 @@ AssignTail:
     je .DefaultMap
     cmp rax, KEnum
     je .DefaultKind
+    cmp rax, KUnion
+    je .DefaultZero
     Fail ErrNeedValue
 .DefaultZero:
     CompileNum 0
@@ -322,8 +429,37 @@ AssignTail:
     CompilePrim PrimMakeMap
     jmp .Store
 .Assign:
+    mov rax, [rel ReplaceType]
+    test rax, rax
+    jnz .AssignHint
+    mov rcx, [rsp]
+    call TypeOf
+.AssignHint:
+    call SetHint
     call Advance
     call ParseExpr
+    mov rcx, [rsp]
+    call NarrowOf
+    test rax, rax
+    jz .KeepNarrow
+    mov rdx, [rel ExprType]
+    cmp rax, rdx
+    je .KeepNarrow
+    cmp rax, TDec
+    jne .UnNarrow
+    cmp rdx, TNum
+    je .KeepNarrow
+.UnNarrow:
+    mov rcx, [rsp]
+    call UnNarrow
+.KeepNarrow:
+    mov rax, [rel ReplaceType]
+    test rax, rax
+    jnz .Coerce
+    mov rcx, [rsp]
+    call TypeOf
+.Coerce:
+    call CoerceTo
     mov rax, [rel ReplaceType]
     test rax, rax
     jz .NoDeclared
@@ -407,6 +543,8 @@ AssignTail:
     call TypeOf
     test rax, rax
     jz .NewCompound
+    mov rax, [rel Here]
+    mov [rel CompoundHere], rax
     mov rcx, [rsp + 16]
     call EmitLoad
     mov rcx, [rsp + 16]
@@ -438,7 +576,13 @@ AssignTail:
     pop rdx
     cmp rax, rdx
     jne TypeError
-    jmp .Store
+    cmp rax, TNum
+    jne .Store
+    call FuseIncrement
+    test eax, eax
+    jz .Store
+    add rsp, 8
+    jmp Pushback
 .NewCompound:
     Fail ErrCompoundNew
 .ChangeType:
@@ -485,7 +629,17 @@ AssignTail:
     mov [rel PathSet], rax
     jmp .PathKeyParse
 .PathMap:
-    mov qword [rel PathKey], TText
+    mov rcx, [rel PathType]
+    call KeyOf
+    mov [rel PathKey], rax
+    cmp rax, TText
+    je .PathTextKey
+    lea rax, [rel PrimMapGetInt]
+    mov [rel PathGet], rax
+    lea rax, [rel PrimMapSetInt]
+    mov [rel PathSet], rax
+    jmp .PathKeyParse
+.PathTextKey:
     lea rax, [rel PrimMapGet]
     mov [rel PathGet], rax
     lea rax, [rel PrimMapSet]
@@ -547,7 +701,14 @@ AssignTail:
     cmp qword [rel PathOp], 1
     jne .PathCompound
     call Advance
+    mov rax, [rel PathElem]
+    call SetHint
     call ParseExpr
+    mov rax, [rel PathElem]
+    test rax, rax
+    jz .PathNoCoerce
+    call CoerceTo
+.PathNoCoerce:
     mov rax, [rel PathElem]
     mov rdx, [rel ExprType]
     test rdx, rdx

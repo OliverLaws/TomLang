@@ -1,6 +1,14 @@
 CheckWord:
     call Advance
+    mov qword [rel LastVarRef], 0
     call ParseExpr
+    mov rcx, [rel OpenBlocks]
+    cmp rcx, 64
+    jae .NoSubj
+    lea rdx, [rel CheckVars]
+    mov rax, [rel LastVarRef]
+    mov [rdx + rcx * 8], rax
+.NoSubj:
     mov rax, [rel ExprType]
     test rax, rax
     jz TypeError
@@ -43,6 +51,12 @@ IsWord:
     xor ebx, ebx
 .Alt:
     push rbx
+    mov rcx, [rel OpenBlocks]
+    call NarrowPopLevel
+    mov rax, [r15 - 16]
+    call KindOfType
+    cmp rax, KUnion
+    je .TypeCase
     mov rcx, [r15 - 24]
     call EmitLoad
     call Advance
@@ -83,6 +97,50 @@ IsWord:
     jmp .Joined
 .EqDec:
     CompilePrim PrimDEq
+    jmp .Joined
+.TypeCase:
+    mov rcx, [r15 - 24]
+    call EmitLoad
+    call Advance
+    IfTok "nothing", .NilCase
+    call ParseTypeName
+    jmp .HaveCase
+.NilCase:
+    mov eax, TNil
+.HaveCase:
+    push rax
+    mov rcx, [r15 - 16]
+    mov rdx, rax
+    call UnionHas
+    test eax, eax
+    jz TypeError
+    CompilePrim PrimTagIs
+    mov rcx, [rsp]
+    call Compile
+    call Advance
+    pop rdx
+    cmp qword [rsp], 0
+    jne .Joined
+    push rdx
+    push rdx
+    IfTok ",", .CaseMany
+    pop rdx
+    pop rdx
+    cmp rdx, TNil
+    je .Joined
+    mov rcx, [rel OpenBlocks]
+    dec rcx
+    cmp rcx, 64
+    jae .Joined
+    lea rax, [rel CheckVars]
+    mov rcx, [rax + rcx * 8]
+    test rcx, rcx
+    jz .Joined
+    call NarrowPush
+    jmp .Joined
+.CaseMany:
+    pop rdx
+    pop rdx
 .Joined:
     pop rbx
     test rbx, rbx
@@ -120,16 +178,46 @@ LaterWord:
     cmp qword [rel InFn], 0
     je .Bad
     mov rax, [rel LaterCount]
-    cmp rax, 16
+    cmp rax, 64
     jae .TooMany
     call GetInput
     mov rcx, [rel LaterCount]
     lea rdx, [rel LaterPos]
     mov [rdx + rcx * 8], rax
+    lea rdx, [rel LaterBlock]
+    mov qword [rdx + rcx * 8], 0
     inc qword [rel LaterCount]
+    mov rcx, [rel TokPtr]
+    add rcx, [rel TokLen]
+.Peek:
+    movzx eax, byte [rcx]
+    cmp eax, ' '
+    je .PeekNext
+    cmp eax, 9
+    je .PeekNext
+    cmp eax, 13
+    je .Block
+    cmp eax, 10
+    je .Block
+    cmp eax, '#'
+    je .Block
+    test eax, eax
+    jz .Block
     push qword [rel Here]
     call ParseOneStatement
     pop qword [rel Here]
+    ret
+.PeekNext:
+    inc rcx
+    jmp .Peek
+.Block:
+    mov rcx, [rel LaterCount]
+    lea rdx, [rel LaterBlock]
+    mov qword [rdx + rcx * 8 - 8], 1
+    mov rax, [rel TokPtr]
+    mov [rel DoStart], rax
+    call SkipBody
+    mov qword [rel TokLen], 0
     ret
 .Bad:
     Fail ErrLaterWhere
@@ -157,7 +245,36 @@ EmitLaters:
     lea rcx, [rel LaterPos]
     mov rcx, [rcx + rax * 8]
     call Unread
+    mov rax, [rsp]
+    lea rcx, [rel LaterBlock]
+    cmp qword [rcx + rax * 8], 0
+    jne .Block
     call ParseOneStatement
+    jmp .Loop
+.Block:
+    inc qword [rel LaterEmitting]
+    push qword [rel OpenBlocks]
+.BlockLoop:
+    call GetInput
+    push rax
+    call NextToken
+    mov [rel TokPtr], rax
+    mov [rel TokLen], rdx
+    pop rcx
+    push rcx
+    IfTok "end", .MaybeEnd
+.Stmt:
+    pop rcx
+    call Unread
+    call ParseAnyStatement
+    jmp .BlockLoop
+.MaybeEnd:
+    mov rax, [rel OpenBlocks]
+    cmp rax, [rsp + 8]
+    jne .Stmt
+    pop rcx
+    pop rax
+    dec qword [rel LaterEmitting]
     jmp .Loop
 .Done:
     pop rax

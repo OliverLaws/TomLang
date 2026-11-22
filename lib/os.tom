@@ -1,0 +1,343 @@
+# Windows Calls
+dll "kernel32"
+    do _getEnv(name: text, buffer: number, size: uint): uint as "GetEnvironmentVariableA"
+    do _setEnv(name: text, value: text): bool as "SetEnvironmentVariableA"
+    do _removeEnv(name: text, value: number): bool as "SetEnvironmentVariableA"
+    do _changeFolder(path: text): bool as "SetCurrentDirectoryA"
+    do _moduleFileName(module: number, buffer: number, size: uint): uint as "GetModuleFileNameA"
+    do _processId(): uint as "GetCurrentProcessId"
+    do _exit(code: uint) as "ExitProcess"
+    do _commandLine(): number as "GetCommandLineA"
+    do _createProcess(app: number, command: text, processSecurity: number, threadSecurity: number, inherit: bool, flags: uint, environment: number, folder: number, startupInfo: number, processInfo: number): bool as "CreateProcessA"
+    do _wait(handle: number, milliseconds: uint): uint as "WaitForSingleObject"
+    do _exitCode(handle: number, code: number): bool as "GetExitCodeProcess"
+    do _createPipe(readHandle: number, writeHandle: number, security: number, size: uint): bool as "CreatePipe"
+    do _noInherit(handle: number, mask: uint, flags: uint): bool as "SetHandleInformation"
+    do _stdHandle(which: int): number as "GetStdHandle"
+    do _readFile(handle: number, buffer: number, size: uint, done: number, overlapped: number): bool as "ReadFile"
+    do _close(handle: number): bool as "CloseHandle"
+    do _systemInfo(info: number) as "GetNativeSystemInfo"
+    do _memoryStatus(status: number): bool as "GlobalMemoryStatusEx"
+    do _computerName(buffer: number, size: number): bool as "GetComputerNameA"
+    do _tempPath(size: uint, buffer: number): uint as "GetTempPathA"
+    do _globalAlloc(flags: uint, size: number): number as "GlobalAlloc"
+    do _globalLock(memory: number): number as "GlobalLock"
+    do _globalUnlock(memory: number): bool as "GlobalUnlock"
+end
+
+dll "advapi32"
+    do _userName(buffer: number, size: number): bool as "GetUserNameA"
+end
+
+dll "shell32"
+    do _shellExecute(window: number, action: text, file: text, parameters: number, folder: number, show: int): number as "ShellExecuteA"
+end
+
+dll "user32"
+    do _openClipboard(window: number): bool as "OpenClipboard"
+    do _closeClipboard(): bool as "CloseClipboard"
+    do _emptyClipboard(): bool as "EmptyClipboard"
+    do _setClipboard(format: uint, data: number): number as "SetClipboardData"
+    do _getClipboard(format: uint): number as "GetClipboardData"
+end
+
+# Records
+record CommandResult
+    output: text
+    exitCode: number
+end
+
+# Private Helpers
+keep _WaitForever = 4294967295
+keep _NoWindow = 134217728
+keep _UseStdHandles = 256
+keep _StartupInfoSize = 104
+keep _ProcessInfoSize = 24
+keep _PlainText = 1
+
+do _splitCommandLine(line: text): list of text
+    set words: list of text = []
+    set current: list of text = []
+    set inQuotes = false
+    set started = false
+    repeat each character in line
+        if character == "\""
+            inQuotes = not inQuotes
+            started = true
+        otherwise if (character == " " or character == "\t") and not inQuotes
+            if started
+                words.add(current.join())
+                current = []
+                started = false
+            end
+        otherwise
+            current.add(character)
+            started = true
+        end
+    end
+    if started
+        words.add(current.join())
+    end
+    return words
+end
+
+do _startProcess(command: text, startupInfo: number, processInfo: number, inherit: bool, flags: number)
+    if not _createProcess(0, "cmd.exe /c " + command, 0, 0, inherit, flags, 0, 0, startupInfo, processInfo)
+        fail "can't run {command}"
+    end
+end
+
+do _finishProcess(processInfo: number): number
+    set process = read64(processInfo)
+    later _close(process)
+    later _close(read64(processInfo + 8))
+
+    _wait(process, _WaitForever)
+    set codeBox = memory(8)
+    later freeMemory(codeBox)
+    write64(codeBox, 0)
+    _exitCode(process, codeBox)
+    return read32(codeBox) & 0xFFFFFFFF
+end
+
+# Environment Variables
+do getEnv(name: text): text
+    set size = _getEnv(name, 0, 0)
+    if size == 0
+        return ""
+    end
+    set buffer = memory(size)
+    later freeMemory(buffer)
+    set length = _getEnv(name, buffer, size)
+    return readText(buffer, length)
+end
+
+do getEnvOr(name: text, fallback: text): text
+    set value = getEnv(name)
+    if value == ""
+        return fallback
+    end
+    return value
+end
+
+do hasEnv(name: text): bool
+    return _getEnv(name, 0, 0) != 0
+end
+
+do setEnv(name: text, value: text)
+    if not _setEnv(name, value)
+        fail "can't set environment variable {name}"
+    end
+end
+
+do removeEnv(name: text)
+    _removeEnv(name, 0)
+end
+
+# Program & Process
+do commandLine(): text
+    return readText(_commandLine())
+end
+
+do arguments(): list of text
+    set words = _splitCommandLine(commandLine())
+    set out: list of text = []
+    repeat i from 3 to words.length
+        out.add(words[i])
+    end
+    return out
+end
+
+do executablePath(): text
+    set buffer = memory(1024)
+    later freeMemory(buffer)
+    set length = _moduleFileName(0, buffer, 1024)
+    return readText(buffer, length)
+end
+
+do processId(): number
+    return _processId()
+end
+
+do changeFolder(folderPath: text)
+    if not _changeFolder(folderPath)
+        fail "can't change to folder {folderPath}"
+    end
+end
+
+do exit(code: number)
+    _exit(code)
+end
+
+# Running Programs
+do runCommand(command: text): number
+    set startupInfo = memory(_StartupInfoSize)
+    later freeMemory(startupInfo)
+    set processInfo = memory(_ProcessInfoSize)
+    later freeMemory(processInfo)
+    write32(startupInfo, _StartupInfoSize)
+
+    _startProcess(command, startupInfo, processInfo, false, 0)
+    return _finishProcess(processInfo)
+end
+
+do runCommandOutput(command: text): CommandResult
+    set security = memory(24)
+    later freeMemory(security)
+    write32(security, 24)
+    write64(security + 8, 0)
+    write32(security + 16, 1)
+
+    set pipeBox = memory(16)
+    later freeMemory(pipeBox)
+    if not _createPipe(pipeBox, pipeBox + 8, security, 0)
+        fail "can't run {command}"
+    end
+    set readEnd = read64(pipeBox)
+    set writeEnd = read64(pipeBox + 8)
+    later _close(readEnd)
+    _noInherit(readEnd, 1, 0)
+
+    set startupInfo = memory(_StartupInfoSize)
+    later freeMemory(startupInfo)
+    set processInfo = memory(_ProcessInfoSize)
+    later freeMemory(processInfo)
+    write32(startupInfo, _StartupInfoSize)
+    write32(startupInfo + 60, _UseStdHandles)
+    write64(startupInfo + 80, _stdHandle(-10))
+    write64(startupInfo + 88, writeEnd)
+    write64(startupInfo + 96, writeEnd)
+
+    _startProcess(command, startupInfo, processInfo, true, _NoWindow)
+    _close(writeEnd)
+
+    set chunks: list of text = []
+    set buffer = memory(4096)
+    later freeMemory(buffer)
+    set doneBox = memory(8)
+    later freeMemory(doneBox)
+    repeat forever
+        write64(doneBox, 0)
+        set ok = _readFile(readEnd, buffer, 4096, doneBox, 0)
+        set got = read32(doneBox)
+        if not ok or got == 0
+            stop
+        end
+        chunks.add(readText(buffer, got))
+    end
+
+    set code = _finishProcess(processInfo)
+    return CommandResult(output: chunks.join(), exitCode: code)
+end
+
+do openWithDefaultApp(pathOrUrl: text)
+    if _shellExecute(0, "open", pathOrUrl, 0, 0, 1) <= 32
+        fail "can't open {pathOrUrl}"
+    end
+end
+
+# System Info
+do operatingSystem(): text
+    return "windows"
+end
+
+do architecture(): text
+    set info = memory(48)
+    later freeMemory(info)
+    _systemInfo(info)
+    check read16(info)
+        is 9
+            return "x64"
+        is 12
+            return "arm64"
+        is 0
+            return "x86"
+    end
+    return "unknown"
+end
+
+do cpuCoreCount(): number
+    set info = memory(48)
+    later freeMemory(info)
+    _systemInfo(info)
+    return read32(info + 32)
+end
+
+do totalMemoryBytes(): number
+    set status = memory(64)
+    later freeMemory(status)
+    write32(status, 64)
+    _memoryStatus(status)
+    return read64(status + 8)
+end
+
+do availableMemoryBytes(): number
+    set status = memory(64)
+    later freeMemory(status)
+    write32(status, 64)
+    _memoryStatus(status)
+    return read64(status + 16)
+end
+
+do computerName(): text
+    set buffer = memory(256)
+    later freeMemory(buffer)
+    set sizeBox = memory(8)
+    later freeMemory(sizeBox)
+    write64(sizeBox, 256)
+    _computerName(buffer, sizeBox)
+    return readText(buffer, read32(sizeBox))
+end
+
+do userName(): text
+    set buffer = memory(256)
+    later freeMemory(buffer)
+    set sizeBox = memory(8)
+    later freeMemory(sizeBox)
+    write64(sizeBox, 256)
+    _userName(buffer, sizeBox)
+    return readText(buffer)
+end
+
+do tempFolder(): text
+    set buffer = memory(1024)
+    later freeMemory(buffer)
+    set length = _tempPath(1024, buffer)
+    return readText(buffer, length)
+end
+
+do homeFolder(): text
+    return getEnv("USERPROFILE")
+end
+
+# Clipboard
+do copyToClipboard(content: text)
+    if not _openClipboard(0)
+        fail "can't open the clipboard"
+    end
+    later _closeClipboard()
+    _emptyClipboard()
+
+    set size = byteLength(content) + 1
+    set handle = _globalAlloc(2, size)
+    set place = _globalLock(handle)
+    writeText(place, content)
+    _globalUnlock(handle)
+    _setClipboard(_PlainText, handle)
+end
+
+do readClipboard(): text
+    if not _openClipboard(0)
+        fail "can't open the clipboard"
+    end
+    later _closeClipboard()
+
+    set handle = _getClipboard(_PlainText)
+    if handle == 0
+        return ""
+    end
+    set place = _globalLock(handle)
+    set content = readText(place)
+    _globalUnlock(handle)
+    return content
+end

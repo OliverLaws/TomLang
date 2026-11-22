@@ -10,10 +10,14 @@ global UseDepth
 global SaveMain
 global RestoreMain
 global SetMainFile
+global ForwardOps
 global SourceStart
 global SourceEnd
 global CurFile
+global FilePath
+global FileCount
 global TryForward
+global TryForwardVar
 
 extern InitIO
 extern PrintString
@@ -45,6 +49,7 @@ extern ErrPos
 extern PrevTokPtr
 extern MakingConst
 extern EndWord
+extern NoteStmt
 extern OtherwiseWord
 extern ReturnWord
 extern StopWord
@@ -74,6 +79,7 @@ extern Advance
 extern Unread
 extern Alloc
 extern PermAlloc
+extern Latest
 extern StackBase
 extern InFn
 extern InstanceDepth
@@ -81,15 +87,27 @@ extern PreScanActive
 extern PreScanFail
 extern EmitGlobalInits
 extern PrimBranch
+extern PrimCall
+extern PrimCallValue
+extern InstEnd
 extern NestDepth
 extern NestHeaderDone
+extern NestFloor
 extern NestAbort
 extern PreDeclare
+extern PreHandler
+extern FullForward
+extern SetWord
+extern KeepWord
+extern NoteForwardVar
+extern LookupVar
 extern NamePrefixPtr
 extern NamePrefixLen
 extern CopyString
 
 section .data
+CalledFrom db "  called from line "
+CalledFromLen equ $ - CalledFrom
 Prompt         db "> "
 PromptLen      equ $ - Prompt
 More           db ". "
@@ -126,7 +144,7 @@ ErrAliasLen    equ $ - ErrAlias
 LibDir         db "lib/"
 UpLibDir       db "../lib/"
 
-%define MaxLines 65536
+%define MaxLines 262144
 
 DoWordAddr     dq DoWord, IfWord, RepeatWord, CheckWord, TryWord, DllWord
 
@@ -140,11 +158,15 @@ ExeDirLen   resq 1
 UseStack    resq 16 * 16
 PrefixBuf   resb 256
 CurFile     resq 1
+FileAliasPtr resq 256
+FileAliasLen resq 256
 BareUse     resq 1
+AllOfUse    resq 1
+OpsScanned  resb 256
 BarePtr     resq 1
 BareLen     resq 1
 FileCount   resq 1
-FilePath    resq 2 * 64
+FilePath    resq 2 * 256
 PathTemp    resb 2048
 NormBuf     resb 2048
 SegPos      resq 256
@@ -231,6 +253,16 @@ Tokens:
     push rax
     push rdx
     call CheckDead
+    pop rdx
+    pop rax
+    push rax
+    push rdx
+    xor ecx, ecx
+    cmp rdx, 2
+    jne .NoteIt
+    mov rcx, rax
+.NoteIt:
+    call NoteStmt
     pop rdx
     pop rax
     test rax, rax
@@ -382,6 +414,70 @@ RuntimeLine:
 .Done:
     ret
 
+PrintCallers:
+    push rbx
+    push r12
+    push r13
+    push r14
+    sub rsp, 8
+    mov r12, rbp
+    xor r13d, r13d
+    call RuntimeLine
+    mov [rsp], rax
+.Walk:
+    sub r12, 8
+    lea rax, [rel ReturnStack]
+    cmp r12, rax
+    jb .Done
+    cmp r13, 6
+    jae .Done
+    mov rax, [r12]
+    test rax, 7
+    jnz .Walk
+    lea rcx, [rel CodeBuf]
+    cmp rax, rcx
+    jb .Walk
+    lea rcx, [rel InstEnd]
+    cmp rax, rcx
+    jae .Walk
+    mov rcx, [rax - 16]
+    lea rdx, [rel PrimCall]
+    cmp rcx, rdx
+    je .Frame
+    lea rdx, [rel PrimCallValue]
+    cmp rcx, rdx
+    jne .Walk
+.Frame:
+    lea r14, [rax - 8]
+    call RuntimeLine
+    test rax, rax
+    jz .Walk
+    cmp rax, [rsp]
+    je .Walk
+    mov [rsp], rax
+    mov rbx, rax
+    lea rcx, [rel CalledFrom]
+    mov edx, CalledFromLen
+    call PrintString
+    mov ecx, ebx
+    call PrintNumber
+    mov rcx, rbx
+    shr rcx, 32
+    test rcx, rcx
+    jz .NoFile
+    call PrintFileIn
+.NoFile:
+    call PrintNewLine
+    inc r13
+    jmp .Walk
+.Done:
+    add rsp, 8
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 Caught:
     mov rcx, [rel ErrMsg]
     mov rdx, [rel ErrLen]
@@ -466,8 +562,26 @@ UseWord:
     jne .Where
     call Advance
     mov qword [rel BareUse], 0
+    mov qword [rel AllOfUse], 0
     mov rcx, [rel TokPtr]
     mov rdx, [rel TokLen]
+    cmp rdx, 3
+    jne .NotAll
+    cmp word [rcx], 'al'
+    jne .NotAll
+    cmp byte [rcx + 2], 'l'
+    jne .NotAll
+    call Advance
+    mov rcx, [rel TokPtr]
+    cmp qword [rel TokLen], 2
+    jne .BadName
+    cmp word [rcx], 'of'
+    jne .BadName
+    call Advance
+    mov qword [rel AllOfUse], 1
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+.NotAll:
     test rdx, rdx
     jz .BadName
     cmp byte [rcx], 34
@@ -508,6 +622,8 @@ UseWord:
     je .AliasDone
     cmp qword [rel AliasLen], 0
     jne .AliasDone
+    cmp qword [rel AllOfUse], 0
+    jne .AliasDone
     call BareAlias
 .AliasDone:
     call AlreadyUsed
@@ -516,7 +632,7 @@ UseWord:
     mov rax, [rel UseDepth]
     cmp rax, 16
     jae .Deep
-    cmp qword [rel FileCount], 64
+    cmp qword [rel FileCount], 256
     jae .Deep
     shl rax, 7
     lea r8, [rel UseStack]
@@ -549,6 +665,15 @@ UseWord:
     inc qword [rel UseDepth]
     call RegisterPath
     mov [rel CurFile], rax
+    cmp rax, 256
+    jae .NoAliasRecord
+    lea rcx, [rel FileAliasPtr]
+    mov rdx, [rel AliasPtr]
+    mov [rcx + rax * 8], rdx
+    lea rcx, [rel FileAliasLen]
+    mov rdx, [rel AliasLen]
+    mov [rcx + rax * 8], rdx
+.NoAliasRecord:
     pop rdx
     pop rcx
     mov [rel SourceStart], rcx
@@ -560,6 +685,18 @@ UseWord:
     ret
 .Skip:
     add rsp, 16
+    cmp qword [rel AliasLen], 0
+    je .SkipDone
+    cmp r10, 256
+    jae .SkipDone
+    lea rcx, [rel FileAliasLen]
+    mov rdx, [rcx + r10 * 8]
+    test rdx, rdx
+    jz .SkipDone
+    lea rcx, [rel FileAliasPtr]
+    mov rcx, [rcx + r10 * 8]
+    call AliasCopy
+.SkipDone:
     ret
 .Where:
     lea rcx, [rel ErrUseWhere]
@@ -574,6 +711,188 @@ UseWord:
     mov edx, ErrUseDeepLen
     jmp Abort
 
+TryForwardVar:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push rsi
+    push rdi
+    sub rsp, 8
+    mov rsi, rcx
+    mov rdi, rdx
+    call GetInput
+    mov r12, rax
+    mov r13, rdx
+    mov [rsp], rdx
+    mov rcx, [rel StmtTok]
+    cmp rcx, [rel SourceStart]
+    jb .Out
+    mov rdx, [rel SourceEnd]
+    cmp rcx, rdx
+    jae .Out
+    mov r13, rdx
+    sub rdx, rcx
+    call SetInput
+.Loop:
+    call NextToken
+    test rdx, rdx
+    jz .Out
+    cmp rax, [rel SourceStart]
+    je .Col0
+    movzx ecx, byte [rax - 1]
+    cmp ecx, 10
+    jne .Loop
+.Col0:
+    mov ebx, 3
+    cmp rdx, 3
+    jne .Keep
+    cmp word [rax], 'se'
+    jne .Loop
+    cmp byte [rax + 2], 't'
+    jne .Loop
+    lea r8, [rel SetWord]
+    jmp .Word
+.Keep:
+    cmp rdx, 4
+    jne .Loop
+    cmp dword [rax], 'keep'
+    jne .Loop
+    mov ebx, 4
+    lea r8, [rel KeepWord]
+.Word:
+    mov [rel PreHandler], r8
+    mov r14, rax
+    call NextToken
+    cmp rdx, rdi
+    jne .Loop
+    xor ecx, ecx
+.Cmp:
+    cmp rcx, rdi
+    jae .Match
+    mov r8b, [rax + rcx]
+    cmp r8b, [rsi + rcx]
+    jne .Loop
+    inc rcx
+    jmp .Cmp
+.Match:
+    movzx ecx, byte [rax + rdi]
+    cmp ecx, ' '
+    je .Ok
+    cmp ecx, ':'
+    je .Ok
+    cmp ecx, '='
+    jne .Loop
+.Ok:
+    lea rcx, [r14 + rbx]
+    mov rdx, r13
+    sub rdx, rcx
+    call SetInput
+    mov rcx, r14
+    mov rdx, rbx
+    call PreDeclare
+    mov rcx, rsi
+    mov rdx, rdi
+    call LookupVar
+    test rax, rax
+    jz .Out
+    call NoteForwardVar
+.Out:
+    mov rcx, r12
+    mov rdx, [rsp]
+    sub rdx, r12
+    call SetInput
+    add rsp, 8
+    pop rdi
+    pop rsi
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+ForwardOps:
+    mov rax, [rel CurFile]
+    cmp rax, 256
+    jae .Skip
+    lea rcx, [rel OpsScanned]
+    cmp byte [rcx + rax], 0
+    jne .Skip
+    mov byte [rcx + rax], 1
+    push rbx
+    push r12
+    push r13
+    push r14
+    push rsi
+    push rdi
+    sub rsp, 8
+    call GetInput
+    mov r12, rax
+    mov r13, rdx
+    mov [rsp], rdx
+    mov rcx, [rel StmtTok]
+    cmp rcx, [rel SourceStart]
+    jb .Out
+    mov rdx, [rel SourceEnd]
+    cmp rcx, rdx
+    jae .Out
+    mov r13, rdx
+    sub rdx, rcx
+    call SetInput
+.Loop:
+    call NextToken
+    test rdx, rdx
+    jz .Out
+    cmp rax, [rel SourceStart]
+    je .Col0
+    movzx ecx, byte [rax - 1]
+    cmp ecx, 10
+    je .Col0
+    cmp ecx, 13
+    jne .Loop
+.Col0:
+    cmp rdx, 2
+    jne .Loop
+    cmp word [rax], 'do'
+    jne .Loop
+    mov r14, rax
+    call NextToken
+    cmp rdx, 1
+    jne .Loop
+    cmp byte [rax], '('
+    je .Found
+    cmp byte [rax], '-'
+    jne .Loop
+.Found:
+    lea rcx, [r14 + 2]
+    mov rdx, r13
+    sub rdx, rcx
+    call SetInput
+    lea rax, [rel FullForward]
+    mov [rel PreHandler], rax
+    mov rcx, r14
+    mov edx, 2
+    call PreDeclare
+    lea rcx, [r14 + 2]
+    mov rdx, r13
+    sub rdx, rcx
+    call SetInput
+    jmp .Loop
+.Out:
+    mov rcx, r12
+    mov rdx, [rsp]
+    sub rdx, r12
+    call SetInput
+    add rsp, 8
+    pop rdi
+    pop rsi
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+.Skip:
+    ret
+
 TryForward:
     push rbx
     push r12
@@ -587,9 +906,16 @@ TryForward:
     call GetInput
     mov r12, rax
     mov r13, rdx
-    mov rax, [rel SourceEnd]
-    cmp r13, rax
-    jne .Out
+    mov [rsp], rdx
+    mov rcx, [rel StmtTok]
+    cmp rcx, [rel SourceStart]
+    jb .Out
+    mov rdx, [rel SourceEnd]
+    cmp rcx, rdx
+    jae .Out
+    mov r13, rdx
+    sub rdx, rcx
+    call SetInput
     xor ebx, ebx
 .Loop:
     call NextToken
@@ -614,7 +940,12 @@ TryForward:
     mov r14, rax
     call NextToken
     cmp rdx, rdi
+    je .LenOk
+    cmp byte [rax + rdx], '.'
     jne .Loop
+    cmp rdx, rdi
+    jae .Loop
+.LenOk:
     xor ecx, ecx
 .Cmp:
     cmp rcx, rdi
@@ -627,10 +958,30 @@ TryForward:
 .Match:
     cmp byte [rax + rdi], '('
     jne .Loop
+    push rsi
+    push rdi
     lea rcx, [r14 + 2]
     mov rdx, r13
     sub rdx, rcx
     call SetInput
+    lea rax, [rel FullForward]
+    mov [rel PreHandler], rax
+    mov rcx, r14
+    mov edx, 2
+    call PreDeclare
+    pop rdi
+    pop rsi
+    mov rcx, rsi
+    mov rdx, rdi
+    call FindWord
+    test rax, rax
+    jnz .Out
+    lea rcx, [r14 + 2]
+    mov rdx, r13
+    sub rdx, rcx
+    call SetInput
+    lea rax, [rel DoWord]
+    mov [rel PreHandler], rax
     mov rcx, r14
     mov edx, 2
     call PreDeclare
@@ -651,7 +1002,7 @@ TryForward:
     jmp .Loop
 .Out:
     mov rcx, r12
-    mov rdx, r13
+    mov rdx, [rsp]
     sub rdx, r12
     call SetInput
     add rsp, 8
@@ -870,6 +1221,78 @@ BareAlias:
     pop rdx
     mov [rel AliasPtr], rax
     mov [rel AliasLen], rdx
+    ret
+
+AliasCopy:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rcx
+    mov r13, rdx
+    mov r15, [rel Latest]
+    cmp r13, [rel AliasLen]
+    jne .Differ
+    mov rsi, r12
+    mov rdi, [rel AliasPtr]
+    mov rcx, r13
+    repe cmpsb
+    je .Out
+.Differ:
+    mov rbx, [rel Latest]
+    mov r15, rbx
+.Walk:
+    test rbx, rbx
+    jz .Out
+    movzx r14d, byte [rbx + 17]
+    cmp r14, r13
+    jbe .Next
+    lea rsi, [rbx + 18]
+    mov rdi, r12
+    mov rcx, r13
+    repe cmpsb
+    jne .Next
+    mov rcx, r14
+    sub rcx, r13
+    add rcx, [rel AliasLen]
+    cmp rcx, 250
+    ja .Next
+    add rcx, 32
+    call PermAlloc
+    mov rdx, r15
+    mov [rax], rdx
+    mov rdx, [rbx + 8]
+    mov [rax + 8], rdx
+    mov dl, [rbx + 16]
+    mov [rax + 16], dl
+    mov rcx, r14
+    sub rcx, r13
+    add rcx, [rel AliasLen]
+    mov [rax + 17], cl
+    lea rdi, [rax + 18]
+    mov rsi, [rel AliasPtr]
+    mov rcx, [rel AliasLen]
+    rep movsb
+    lea rsi, [rbx + 18 + r13]
+    mov rcx, r14
+    sub rcx, r13
+    rep movsb
+    mov r15, rax
+.Next:
+    mov rbx, [rbx]
+    jmp .Walk
+.Out:
+    mov [rel Latest], r15
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
     ret
 
 AlreadyUsed:
@@ -1259,6 +1682,8 @@ LineOf:
     ret
 
 Warn:
+    cmp qword [rel PreScanActive], 0
+    jne .Skip
     cmp qword [rel UseDepth], 0
     jne .Skip
     cmp qword [rel InstanceDepth], 0
@@ -1376,11 +1801,13 @@ Recover:
     jmp Tokens
 .Fn:
     mov r8d, 1
-    cmp qword [rel NestDepth], 0
+    mov rax, [rel NestDepth]
+    cmp rax, [rel NestFloor]
     je .Block
     xor r8d, r8d
-    cmp qword [rel NestHeaderDone], 0
-    jne .Block
+    call NestHeaderDone
+    test rax, rax
+    jnz .Block
     call NestAbort
     xor r8d, r8d
 .Block:
@@ -1563,6 +1990,12 @@ Abort:
     call PrintString
 .Newline:
     call PrintNewLine
+    cmp qword [rel Running], 0
+    je .NoTrace
+    cmp qword [rel FileMode], 0
+    je .NoTrace
+    call PrintCallers
+.NoTrace:
     mov qword [rel ErrTokLen], 0
     mov qword [rel ErrPos], 0
     cmp qword [rel FileMode], 0

@@ -23,7 +23,20 @@ global PrimPrint
 global PrimSayStr
 global PrimBye
 global PrimFail
+global PrimDPow
 global PrimPushFrame
+global PrimBox
+global PrimUnbox
+global PrimTagIs
+global PrimGetG
+global PrimSetG
+global PrimIncG
+global PrimIncL
+global PrimEnterHeap
+global PrimReturnHeap
+global PrimFetchOff
+global PrimStoreOff
+global PrimReorder
 global PrimLinkGet
 global PrimLinkSet
 global PrimMissingFn
@@ -80,6 +93,14 @@ ErrDivZero     db "can't divide by 0"
 ErrDivZeroLen  equ $ - ErrDivZero
 ErrMissingFn   db "this function was never finished (its definition has a mistake)"
 ErrMissingFnLen equ $ - ErrMissingFn
+ErrIsNothing db "this is nothing"
+ErrIsNothingLen equ $ - ErrIsNothing
+ErrFnUnset db "this function value hasn't been set yet"
+ErrFnUnsetLen equ $ - ErrFnUnset
+ErrPowBig db "that power is too big for a whole number (use a decimal, like 2.0 ^ 100)"
+ErrPowBigLen equ $ - ErrPowBig
+ErrPowNeg db "a negative number to a fractional power has no answer"
+ErrPowNegLen equ $ - ErrPowNeg
 align 8
 NoError dq 0
 ErrOverflow    db "too much recursion (the stack is full)"
@@ -222,13 +243,98 @@ PrimPow:
     test rcx, 1
     jz .Square
     imul rbx, rax
+    jo PowBig
 .Square:
-    imul rax, rax
     shr rcx, 1
+    jz .Done
+    imul rax, rax
+    jo PowBig
     jmp .Loop
 .Done:
     DPush rbx
     NEXT
+
+PowBig:
+    lea rcx, [rel ErrPowBig]
+    mov edx, ErrPowBigLen
+    jmp Abort
+
+PrimDPow:
+    DPop rax
+    movq xmm1, rax
+    DPop rax
+    movq xmm0, rax
+    cvttsd2si rcx, xmm1
+    cvtsi2sd xmm2, rcx
+    ucomisd xmm2, xmm1
+    jne .Real
+    jp .Real
+    mov rdx, rcx
+    test rdx, rdx
+    jns .AbsOk
+    neg rdx
+.AbsOk:
+    cmp rdx, 4096
+    ja .Real
+    mov rax, 1
+    cvtsi2sd xmm3, rax
+.IntLoop:
+    test rdx, rdx
+    jz .IntDone
+    test rdx, 1
+    jz .IntSq
+    mulsd xmm3, xmm0
+.IntSq:
+    mulsd xmm0, xmm0
+    shr rdx, 1
+    jmp .IntLoop
+.IntDone:
+    test rcx, rcx
+    jns .Push3
+    mov rax, 1
+    cvtsi2sd xmm0, rax
+    divsd xmm0, xmm3
+    movapd xmm3, xmm0
+.Push3:
+    movq rax, xmm3
+    DPush rax
+    NEXT
+.Real:
+    xorpd xmm2, xmm2
+    ucomisd xmm0, xmm2
+    jb .Negative
+    je .Zero
+    sub rsp, 16
+    movsd [rsp], xmm1
+    movsd [rsp + 8], xmm0
+    fld qword [rsp]
+    fld qword [rsp + 8]
+    fyl2x
+    fld st0
+    frndint
+    fsub st1, st0
+    fxch st1
+    f2xm1
+    fld1
+    faddp st1, st0
+    fscale
+    fstp st1
+    fstp qword [rsp]
+    mov rax, [rsp]
+    add rsp, 16
+    DPush rax
+    NEXT
+.Zero:
+    xorpd xmm2, xmm2
+    ucomisd xmm1, xmm2
+    jb PowBig
+    movq rax, xmm2
+    DPush rax
+    NEXT
+.Negative:
+    lea rcx, [rel ErrPowNeg]
+    mov edx, ErrPowNegLen
+    jmp Abort
 
 PrimAnd:
     DPop rax
@@ -356,6 +462,8 @@ PrimCallValue:
 .Shifted:
     sub r15, 8
     pop rbx
+    test rbx, rbx
+    jz .Unset
     test rbx, 1
     jz .Call
     dec rbx
@@ -375,6 +483,10 @@ PrimCallValue:
     RPush r14
     mov r14, rbx
     NEXT
+.Unset:
+    lea rcx, [rel ErrFnUnset]
+    mov edx, ErrFnUnsetLen
+    jmp Abort
 
 PrimMakeClosure:
     DPop rcx
@@ -423,6 +535,156 @@ PrimReturn:
     mov rbp, r13
     RPop r13
     RPop r14
+    NEXT
+
+PrimReorder:
+    mov rcx, [r14]
+    add r14, 8
+    mov rax, rcx
+    shl rax, 3
+    mov rdx, r15
+    sub rdx, rax
+    sub rsp, 136
+    xor r8d, r8d
+.Copy:
+    cmp r8, rcx
+    jae .Copied
+    mov rax, [rdx + r8 * 8]
+    mov [rsp + r8 * 8], rax
+    inc r8
+    jmp .Copy
+.Copied:
+    xor r8d, r8d
+.Put:
+    cmp r8, rcx
+    jae .Done
+    mov r9, [r14 + r8 * 8]
+    mov rax, [rsp + r9 * 8]
+    mov [rdx + r8 * 8], rax
+    inc r8
+    jmp .Put
+.Done:
+    add rsp, 136
+    lea r14, [r14 + rcx * 8]
+    NEXT
+
+PrimEnterHeap:
+    mov rcx, [r14]
+    add r14, 8
+    RPush r13
+    lea rax, [rel ReturnStackEnd - 64]
+    cmp rbp, rax
+    ja Overflow
+    push rcx
+    push rcx
+    lea rcx, [rcx * 8 + 8]
+    call Alloc
+    pop rcx
+    pop rcx
+    xor edx, edx
+.Clear:
+    cmp rdx, rcx
+    jae .Done
+    mov qword [rax + rdx * 8], 0
+    inc rdx
+    jmp .Clear
+.Done:
+    mov r13, rax
+    NEXT
+
+PrimReturnHeap:
+    RPop r13
+    RPop r14
+    NEXT
+
+PrimFetchOff:
+    mov rcx, [r14]
+    add r14, 8
+    mov rax, [r15 - 8]
+    mov rax, [rax + rcx]
+    mov [r15 - 8], rax
+    NEXT
+
+PrimStoreOff:
+    mov rcx, [r14]
+    add r14, 8
+    DPop rax
+    DPop rbx
+    mov [rax + rcx], rbx
+    NEXT
+
+PrimGetG:
+    mov rax, [r14]
+    add r14, 8
+    mov rax, [rax]
+    DPush rax
+    NEXT
+
+PrimSetG:
+    mov rax, [r14]
+    add r14, 8
+    DPop rbx
+    mov [rax], rbx
+    NEXT
+
+PrimIncG:
+    mov rax, [r14]
+    mov rcx, [r14 + 8]
+    add r14, 16
+    add [rax], rcx
+    NEXT
+
+PrimIncL:
+    mov rax, [r14]
+    mov rcx, [r14 + 8]
+    add r14, 16
+    add [r13 + rax], rcx
+    NEXT
+
+PrimBox:
+    mov rcx, [r14]
+    add r14, 8
+    push rcx
+    push rcx
+    mov ecx, 16
+    call Alloc
+    pop rcx
+    pop rcx
+    mov [rax], rcx
+    mov rdx, [r15 - 8]
+    mov [rax + 8], rdx
+    mov [r15 - 8], rax
+    NEXT
+
+PrimUnbox:
+    mov rax, [r15 - 8]
+    test rax, rax
+    jz .Nil
+    mov rax, [rax + 8]
+    mov [r15 - 8], rax
+    NEXT
+.Nil:
+    lea rcx, [rel ErrIsNothing]
+    mov edx, ErrIsNothingLen
+    jmp Abort
+
+PrimTagIs:
+    mov rcx, [r14]
+    add r14, 8
+    mov rax, [r15 - 8]
+    xor edx, edx
+    cmp rcx, 5
+    je .Nil
+    test rax, rax
+    jz .Put
+    cmp [rax], rcx
+    sete dl
+    jmp .Put
+.Nil:
+    test rax, rax
+    sete dl
+.Put:
+    mov [r15 - 8], rdx
     NEXT
 
 PrimPushFrame:

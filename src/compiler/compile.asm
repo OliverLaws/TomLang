@@ -1,6 +1,7 @@
 %include "macros.inc"
 
 global CodeBuf
+global InstEnd
 global Here
 global Compile
 global DictHere
@@ -32,10 +33,10 @@ CodeBuf   resq 1048576
 CodeEnd   resq 64
 DictSpace resq 1048576
 DictEnd   resq 64
-InstSpace resb InstRegion * 10
+InstSpace resb InstRegion * 20
 InstEnd   resq 64
-InstSaveHere resq 10
-InstSaveEnd  resq 10
+InstSaveHere resq 20
+InstSaveEnd  resq 20
 DataSpace resq 2097152
 DataEnd   resq 64
 Here      resq 1
@@ -50,7 +51,7 @@ DictStartPtr dq DictSpace
 DictEndPtr   dq DictEnd
 InstHereTab:
 %assign i 0
-%rep 10
+%rep 20
     dq InstSpace + i * InstRegion
 %assign i i + 1
 %endrep
@@ -287,8 +288,18 @@ MakeText:
     jmp .Put
 .NotN:
     cmp r8b, 't'
-    jne .Put
+    jne .NotT
     mov r8b, 9
+    jmp .Put
+.NotT:
+    cmp r8b, 'r'
+    jne .NotR
+    mov r8b, 13
+    jmp .Put
+.NotR:
+    cmp r8b, '0'
+    jne .Put
+    xor r8d, r8d
 .Put:
     mov [rax + 8 + r10], r8b
     inc r10

@@ -6,9 +6,9 @@ global ReturnStackEnd
 
 section .bss
 StackGuard     resq 4
-DataStack      resq 65536
+DataStack      resq 1048576
 DataStackEnd   resq 4
-ReturnStack    resq 65536
+ReturnStack    resq 1048576
 ReturnStackEnd resq 4
 
 section .text

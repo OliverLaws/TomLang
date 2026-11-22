@@ -58,6 +58,10 @@ TryDotted:
     call FindWord
     test rax, rax
     jz .No
+    mov rcx, [rel TokPtr]
+    add rcx, [rel TokLen]
+    cmp byte [rcx + 1], '_'
+    je .Private
     push rax
     push rdx
     call Advance
@@ -68,6 +72,11 @@ TryDotted:
 .No:
     xor eax, eax
     ret
+
+TryDotted.Private:
+    call Advance
+    call Advance
+    FailTok ErrPrivate
 
 Pushback:
     cmp qword [rel TokLen], 0
@@ -97,10 +106,35 @@ IsTok:
     xor eax, eax
     ret
 
+MapOp:
+    push rdx
+    push r8
+    call KeyOf
+    pop r8
+    pop rcx
+    cmp rax, TText
+    je .Text
+    mov rcx, r8
+.Text:
+    jmp Compile
+
 TypeError:
     cmp qword [rel VoidCall], 2
     je LaterResult
+    mov rax, [rel ExprType]
+    test rax, rax
+    jz .Plain
+    push rax
+    call KindOfType
+    pop rcx
+    cmp rax, KUnion
+    je .Maybe
+    cmp rcx, TNil
+    je .Maybe
+.Plain:
     Fail ErrType
+.Maybe:
+    Fail ErrMaybeNothing
 LaterResult:
     Fail ErrLaterResult
 
@@ -127,8 +161,38 @@ ParseTypeName:
     cmp qword [rel TypeDepth], 100
     ja .TooDeepType
     call ParseTypeNameInner
+.Postfix:
+    mov rcx, [rel TokPtr]
+    add rcx, [rel TokLen]
+    cmp byte [rcx], '?'
+    je .Optional
+    cmp qword [rel NoBar], 0
+    jne .NoEither
+    push rax
+    call PeekBar
+    pop rcx
+    test eax, eax
+    jnz .Either
+    mov rax, rcx
+.NoEither:
     dec qword [rel TypeDepth]
     ret
+.Optional:
+    push rax
+    call Advance
+    pop rcx
+    mov edx, TNil
+    call UnionOf2
+    jmp .Postfix
+.Either:
+    push rcx
+    call Advance
+    call Advance
+    call ParseTypeNameInner
+    pop rcx
+    mov rdx, rax
+    call UnionOf2
+    jmp .Postfix
 .TooDeepType:
     mov qword [rel TypeDepth], 0
     Fail ErrTooDeep
@@ -142,12 +206,31 @@ ParseTypeNameInner:
     cmp rdx, 6
     jne .NotVar
     ret
+.NilType:
+    mov eax, TNil
+    ret
+.Group:
+    push qword [rel NoBar]
+    mov qword [rel NoBar], 0
+    call Advance
+    call ParseTypeName
+    pop qword [rel NoBar]
+    push rax
+    push rax
+    call Advance
+    Expect ")", ErrParen
+    pop rax
+    pop rax
+    ret
 .Plain:
+    IfTok "(", .Group
     IfTok "number", .Num
     IfTok "decimal", .Dec
     IfTok "text", .Text
     IfTok "bool", .Bool
+    IfTok "nothing", .NilType
     IfTok "list", .List
+    IfTok "dictionary", .Map
     IfTok "map", .Map
     IfTok "{", .Record
     IfTok "do", .Func
@@ -163,8 +246,16 @@ ParseTypeNameInner:
     ret
 .StructType:
     mov rax, [rax + 32]
+    cmp rax, [rel PendingType]
+    jne .NotPending
+    mov qword [rel PendingUsed], 1
+.NotPending:
     ret
+.Numeric:
+    mov eax, 26
+    jmp .TypeVar
 .BadName:
+    IfTok "numeric", .Numeric
     cmp qword [rel TokLen], 1
     jne .NotVar
     mov rax, [rel TokPtr]
@@ -172,6 +263,7 @@ ParseTypeNameInner:
     sub eax, 'A'
     cmp eax, 25
     ja .NotVar
+.TypeVar:
     cmp qword [rel InstanceMode], 0
     jne .Bound
     cmp qword [rel NestInInstance], 0
@@ -209,10 +301,42 @@ ParseTypeNameInner:
     mov rcx, rax
     jmp ListOf
 .Map:
+    call GetInput
+    push rax
+    push qword [rel TokPtr]
+    push qword [rel TokLen]
+    call Advance
+    IfTok "from", .MapFrom
+    pop qword [rel TokLen]
+    pop qword [rel TokPtr]
+    pop rcx
+    call Unread
     call OfType
     mov rcx, rax
     jmp MapOf
+.MapFrom:
+    add rsp, 24
+    call Advance
+    call ParseTypeName
+    push rax
+    push rax
+    call Advance
+    Expect "to", ErrMapFrom
+    call Advance
+    inc qword [rel NoBar]
+    call ParseTypeName
+    dec qword [rel NoBar]
+    pop rdx
+    pop rdx
+    mov rcx, rax
+    jmp MapKeyed
 .Func:
+    push qword [rel NoBar]
+    mov qword [rel NoBar], 0
+    call .FuncBody
+    pop qword [rel NoBar]
+    ret
+.FuncBody:
     sub rsp, 136
     mov qword [rsp + 128], 0
     call Advance
@@ -326,7 +450,10 @@ OfType:
 .Of:
     add rsp, 24
     call Advance
-    jmp ParseTypeName
+    inc qword [rel NoBar]
+    call ParseTypeName
+    dec qword [rel NoBar]
+    ret
 
 Compatible:
     test rdx, rdx
@@ -583,7 +710,7 @@ LookupVar:
 .Outer:
     mov rcx, [rsp + 8]
     mov rdx, [rsp]
-    call FindOuter
+    call FindScoped
     test rax, rax
     jz .Global
     add rsp, 16
@@ -612,8 +739,6 @@ LookupVar:
 NewVar:
     cmp qword [rel InFn], 0
     jne AddLocal
-    cmp qword [rel OpenBlocks], 0
-    je CreateVar
     call CreateVar
     mov rcx, [rel InitVarCount]
     cmp rcx, 4096
@@ -751,6 +876,11 @@ MarkConst:
     ret
 
 TypeOf:
+    call NarrowOf
+    test rax, rax
+    jz .NotNarrow
+    ret
+.NotNarrow:
     test rcx, 2
     jnz .Local
     test rcx, 4
@@ -758,10 +888,7 @@ TypeOf:
     mov rax, [rcx - 8]
     ret
 .Outer:
-    shr rcx, 3
-    lea rax, [rel NestSave]
-    mov rax, [rax + (LocalType - ParserState) + rcx * 8]
-    ret
+    jmp ScopedType
 .Local:
     shr rcx, 3
     lea rax, [rel LocalType]
@@ -776,10 +903,7 @@ SetTypeOf:
     mov [rcx - 8], rdx
     ret
 .Outer:
-    shr rcx, 3
-    lea rax, [rel NestSave]
-    mov [rax + (LocalType - ParserState) + rcx * 8], rdx
-    ret
+    jmp ScopedSetType
 .Local:
     shr rcx, 3
     lea rax, [rel LocalType]
@@ -787,52 +911,48 @@ SetTypeOf:
     ret
 
 EmitLoad:
+    call NarrowOf
+    test rax, rax
+    jnz EmitNarrowLoad
+EmitLoadRaw:
     push rcx
     test rcx, 2
     jnz .Local
     test rcx, 4
     jnz .Outer
-    CompilePrim PrimLit
+    CompilePrim PrimGetG
     pop rcx
-    call Compile
-    CompilePrim PrimFetch
-    ret
+    jmp Compile
 .Local:
     CompilePrim PrimLocalGet
     pop rcx
     and rcx, -8
     jmp Compile
 .Outer:
-    CompilePrim PrimLinkGet
-    mov rcx, [rel NestLinkOff]
-    call Compile
     pop rcx
-    and rcx, -8
-    jmp Compile
+    jmp EmitScopedLoad
 
 EmitStore:
+    call NarrowOf
+    test rax, rax
+    jnz EmitNarrowStore
+EmitStoreRaw:
     push rcx
     test rcx, 2
     jnz .Local
     test rcx, 4
     jnz .Outer
-    CompilePrim PrimLit
+    CompilePrim PrimSetG
     pop rcx
-    call Compile
-    CompilePrim PrimStore
-    ret
+    jmp Compile
 .Local:
     CompilePrim PrimLocalSet
     pop rcx
     and rcx, -8
     jmp Compile
 .Outer:
-    CompilePrim PrimLinkSet
-    mov rcx, [rel NestLinkOff]
-    call Compile
     pop rcx
-    and rcx, -8
-    jmp Compile
+    jmp EmitScopedStore
 
 NeedCondition:
     IfTok ":", .Colon
@@ -886,4 +1006,227 @@ NumericPair:
     CompilePrim PrimToDecUnder
 .Done:
     mov eax, TDec
+    ret
+
+
+PeekBar:
+    mov rcx, [rel TokPtr]
+    add rcx, [rel TokLen]
+.Skip:
+    movzx eax, byte [rcx]
+    cmp eax, ' '
+    je .Next
+    cmp eax, 9
+    je .Next
+    cmp eax, '|'
+    jne .No
+    cmp byte [rcx + 1], '|'
+    je .No
+    mov eax, 1
+    ret
+.Next:
+    inc rcx
+    jmp .Skip
+.No:
+    xor eax, eax
+    ret
+
+NarrowOf:
+    xor eax, eax
+    mov r8, [rel NarrowCount]
+.Loop:
+    test r8, r8
+    jz .Done
+    dec r8
+    lea r9, [rel NarrowVar]
+    cmp [r9 + r8 * 8], rcx
+    jne .Loop
+    lea r9, [rel NarrowType]
+    mov rax, [r9 + r8 * 8]
+.Done:
+    ret
+
+EmitNarrowLoad:
+    push rax
+    push rax
+    call EmitLoadRaw
+    pop rax
+    pop rax
+    push rax
+    push rax
+    mov rcx, rax
+    call KindOfType
+    cmp rax, KUnion
+    pop rax
+    pop rax
+    je .Union
+    CompilePrim PrimUnbox
+.Union:
+    ret
+
+EmitNarrowStore:
+    push rcx
+    push rax
+    mov rcx, rax
+    call KindOfType
+    cmp rax, KUnion
+    pop rax
+    je .Union
+    push rax
+    CompilePrim PrimBox
+    pop rcx
+    call Compile
+.Union:
+    pop rcx
+    jmp EmitStoreRaw
+
+CoerceTo:
+    test rax, rax
+    jz .Done
+    mov rdx, [rel ExprType]
+    cmp rax, rdx
+    je .Done
+    push rax
+    push rdx
+    mov rcx, rax
+    call KindOfType
+    pop rdx
+    cmp rax, KIface
+    je .Iface
+    cmp rax, KUnion
+    pop rax
+    jne .Done
+    cmp rdx, TNil
+    je .Take
+    push rax
+    push rdx
+    mov rax, rdx
+    call KindOfType
+    pop rdx
+    cmp rax, KUnion
+    pop rax
+    je .FromUnion
+    push rax
+    push rdx
+    mov rcx, rax
+    call UnionHas
+    pop rdx
+    test eax, eax
+    pop rax
+    jz .Done
+    push rax
+    push rdx
+    CompilePrim PrimBox
+    pop rcx
+    call Compile
+    pop rax
+.Take:
+    mov [rel ExprType], rax
+.Done:
+    ret
+.Iface:
+    pop rax
+    jmp IfaceCoerce
+.FromUnion:
+    push rax
+    push rax
+    mov rcx, rdx
+    mov rdx, rax
+    call UnionSubset
+    pop rcx
+    pop rcx
+    test eax, eax
+    jz .Done
+    mov [rel ExprType], rcx
+    ret
+
+UnionSubset:
+    push rbx
+    push r12
+    push r13
+    mov r12, rcx
+    mov r13, rdx
+    mov rax, r12
+    shl rax, 5
+    lea r8, [rel TypeTable]
+    mov rbx, [r8 + rax + 16]
+    mov r9, [r8 + rax + 24]
+.Each:
+    test rbx, rbx
+    jz .Yes
+    dec rbx
+    push r9
+    mov rcx, r13
+    mov rdx, [r9 + rbx * 8]
+    call UnionHas
+    pop r9
+    test eax, eax
+    jz .No
+    jmp .Each
+.Yes:
+    mov eax, 1
+    jmp .Out
+.No:
+    xor eax, eax
+.Out:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+NarrowPush:
+    mov r8, [rel NarrowCount]
+    cmp r8, 32
+    jae .Full
+    lea r9, [rel NarrowVar]
+    mov [r9 + r8 * 8], rcx
+    lea r9, [rel NarrowType]
+    mov [r9 + r8 * 8], rdx
+    lea r9, [rel NarrowLevel]
+    mov rax, [rel OpenBlocks]
+    mov [r9 + r8 * 8], rax
+    inc qword [rel NarrowCount]
+.Full:
+    ret
+
+NarrowPopLevel:
+.Loop:
+    mov r8, [rel NarrowCount]
+    test r8, r8
+    jz .Done
+    lea r9, [rel NarrowLevel]
+    cmp [r9 + r8 * 8 - 8], rcx
+    jb .Done
+    dec qword [rel NarrowCount]
+    jmp .Loop
+.Done:
+    ret
+
+UnNarrow:
+    mov r8, [rel NarrowCount]
+    lea r9, [rel NarrowVar]
+.Loop:
+    test r8, r8
+    jz .Done
+    dec r8
+    cmp [r9 + r8 * 8], rcx
+    jne .Loop
+    mov qword [r9 + r8 * 8], -1
+    jmp .Loop
+.Done:
+    ret
+
+CoerceElem:
+    test rax, rax
+    jz .Done
+    push rax
+    call CoerceTo
+    pop rax
+    cmp rax, TDec
+    jne .Done
+    cmp qword [rel ExprType], TNum
+    jne .Done
+    CompilePrim PrimToDec
+    SetType TDec
+.Done:
     ret

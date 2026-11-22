@@ -1,0 +1,487 @@
+# Json Type
+type Json = number | decimal | text | bool | nothing | list of Json | dictionary of Json
+
+# Private State
+set _chars: list of text = []
+set _at = 1
+
+# Private Helpers
+do _fail(message: text)
+    fail "json: {message} at character {_at}"
+end
+
+do _peek(): text
+    if _at > _chars.length
+        return ""
+    end
+    return _chars[_at]
+end
+
+do _skipSpace()
+    repeat while _at <= _chars.length
+        set c = _chars[_at]
+        if c != " " and c != "\n" and c != "\t" and c != "\r"
+            stop
+        end
+        _at += 1
+    end
+end
+
+do _expect(word: text)
+    repeat each c in word
+        if _peek() != c
+            _fail("expected '{word}'")
+        end
+        _at += 1
+    end
+end
+
+do _hexValue(c: text): number
+    set code = charCode(c)
+    if code >= 48 and code <= 57
+        return code - 48
+    end
+    if code >= 97 and code <= 102
+        return code - 87
+    end
+    if code >= 65 and code <= 70
+        return code - 55
+    end
+    _fail("bad hex digit '{c}'")
+    return 0
+end
+
+do _readHex4(): number
+    set value = 0
+    repeat 4 times
+        if _at > _chars.length
+            _fail("unfinished \\u escape")
+        end
+        value = value * 16 + _hexValue(_chars[_at])
+        _at += 1
+    end
+    return value
+end
+
+do _readText(): text
+    _at += 1
+    set parts: list of text = []
+    repeat forever
+        if _at > _chars.length
+            _fail("unfinished text")
+        end
+        set c = _chars[_at]
+        _at += 1
+        if c == "\""
+            return parts.join()
+        end
+        if c != "\\"
+            parts.add(c)
+            skip
+        end
+        if _at > _chars.length
+            _fail("unfinished escape")
+        end
+        set e = _chars[_at]
+        _at += 1
+        check e
+            is "\""
+                parts.add("\"")
+            is "\\"
+                parts.add("\\")
+            is "/"
+                parts.add("/")
+            is "n"
+                parts.add("\n")
+            is "t"
+                parts.add("\t")
+            is "r"
+                parts.add("\r")
+            is "b"
+                parts.add(charFrom(8))
+            is "f"
+                parts.add(charFrom(12))
+            is "u"
+                set code = _readHex4()
+                if code >= 0xD800 and code <= 0xDBFF and _peek() == "\\"
+                    _at += 1
+                    _expect("u")
+                    set low = _readHex4()
+                    code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+                end
+                parts.add(charFrom(code))
+            otherwise
+                _fail("unknown escape '\\{e}'")
+        end
+    end
+    return ""
+end
+
+do _readNumber(): Json
+    set start = _at
+    set whole = true
+    if _peek() == "-"
+        _at += 1
+    end
+    repeat while _at <= _chars.length
+        set c = _chars[_at]
+        if c == "." or c == "e" or c == "E" or c == "+" or (c == "-" and _at > start)
+            whole = false
+        otherwise if charCode(c) < 48 or charCode(c) > 57
+            stop
+        end
+        _at += 1
+    end
+    set digits = _chars[start.._at - 1].join()
+    set mantissa: list of text = []
+    set power: list of text = []
+    set inPower = false
+    repeat each c in digits
+        if c == "e" or c == "E"
+            inPower = true
+        otherwise if inPower
+            power.add(c)
+        otherwise
+            mantissa.add(c)
+        end
+    end
+    try
+        if whole and digits.length < 19
+            return number(digits)
+        end
+        if not inPower
+            return decimal(digits)
+        end
+        if power.length > 0 and power[1] == "+"
+            power.remove(1)
+        end
+        return decimal(mantissa.join()) * 10.0 ^ decimal(power.join())
+    end
+    _at = start
+    _fail("bad number '{digits}'")
+    return nothing
+end
+
+do _readList(): Json
+    _at += 1
+    set items: list of Json = []
+    _skipSpace()
+    if _peek() == "]"
+        _at += 1
+        return items
+    end
+    repeat forever
+        items.add(_readValue())
+        _skipSpace()
+        set c = _peek()
+        _at += 1
+        if c == "]"
+            return items
+        end
+        if c != ","
+            _at -= 1
+            _fail("expected ',' or ']'")
+        end
+    end
+    return items
+end
+
+do _readDictionary(): Json
+    _at += 1
+    set fields: dictionary of Json = {}
+    _skipSpace()
+    if _peek() == "}"
+        _at += 1
+        return fields
+    end
+    repeat forever
+        _skipSpace()
+        if _peek() != "\""
+            _fail("expected a \"key\"")
+        end
+        set key = _readText()
+        _skipSpace()
+        _expect(":")
+        fields[key] = _readValue()
+        _skipSpace()
+        set c = _peek()
+        _at += 1
+        if c == "}"
+            return fields
+        end
+        if c != ","
+            _at -= 1
+            _fail("expected ',' or '}'")
+        end
+    end
+    return fields
+end
+
+do _readValue(): Json
+    _skipSpace()
+    set c = _peek()
+    check c
+        is "\{"
+            return _readDictionary()
+        is "["
+            return _readList()
+        is "\""
+            return _readText()
+        is "t"
+            _expect("true")
+            return true
+        is "f"
+            _expect("false")
+            return false
+        is "n"
+            _expect("null")
+            return nothing
+        is ""
+            _fail("unexpected end")
+    end
+    if c == "-" or (charCode(c) >= 48 and charCode(c) <= 57)
+        return _readNumber()
+    end
+    _fail("unexpected '{c}'")
+    return nothing
+end
+
+do _quote(value: text): text
+    set parts = ["\""]
+    repeat each c in value
+        set code = charCode(c)
+        if c == "\""
+            parts.add("\\\"")
+        otherwise if c == "\\"
+            parts.add("\\\\")
+        otherwise if c == "\n"
+            parts.add("\\n")
+        otherwise if c == "\t"
+            parts.add("\\t")
+        otherwise if c == "\r"
+            parts.add("\\r")
+        otherwise if code < 32
+            parts.add("\\u00{_hexDigit(code >> 4)}{_hexDigit(code & 15)}")
+        otherwise
+            parts.add(c)
+        end
+    end
+    parts.add("\"")
+    return parts.join()
+end
+
+do _repeat(piece: text, count: number): text
+    set parts: list of text = []
+    repeat count times
+        parts.add(piece)
+    end
+    return parts.join()
+end
+
+do _split(path: text): list of text
+    set steps: list of text = []
+    set current: list of text = []
+    repeat each c in path
+        if c == "."
+            steps.add(current.join())
+            current = []
+        otherwise
+            current.add(c)
+        end
+    end
+    steps.add(current.join())
+    return steps
+end
+
+do _hexDigit(n: number): text
+    return "0123456789abcdef"[n + 1]
+end
+
+do _write(value: Json, parts: list of text, indent: text, depth: number)
+    set gap = ""
+    set inner = ""
+    set colon = ":"
+    if indent != ""
+        gap = "\n" + _repeat(indent, depth)
+        inner = "\n" + _repeat(indent, depth + 1)
+        colon = ": "
+    end
+    check value
+        is nothing
+            parts.add("null")
+        is bool
+            parts.add(text(value))
+        is number
+            parts.add(text(value))
+        is decimal
+            parts.add(text(value))
+        is text
+            parts.add(_quote(value))
+        is list of Json
+            if value.length == 0
+                parts.add("[]")
+                return
+            end
+            parts.add("[")
+            repeat each i in 1..value.length
+                if i > 1
+                    parts.add(",")
+                end
+                parts.add(inner)
+                _write(value[i], parts, indent, depth + 1)
+            end
+            parts.add(gap)
+            parts.add("]")
+        is dictionary of Json
+            if value.length == 0
+                parts.add("\{}")
+                return
+            end
+            parts.add("\{")
+            set first = true
+            repeat each key in value.keys
+                if not first
+                    parts.add(",")
+                end
+                first = false
+                parts.add(inner)
+                parts.add(_quote(key))
+                parts.add(colon)
+                _write(value[key], parts, indent, depth + 1)
+            end
+            parts.add(gap)
+            parts.add("}")
+    end
+end
+
+# Reading And Writing
+do parse(source: text): Json
+    _chars = [c for each c in source]
+    _at = 1
+    set value = _readValue()
+    _skipSpace()
+    if _at <= _chars.length
+        _fail("extra text after the value")
+    end
+    _chars = []
+    return value
+end
+
+do stringify(value: Json): text
+    set parts: list of text = []
+    _write(value, parts, "", 0)
+    return parts.join()
+end
+
+do pretty(value: Json, indent: number = 2): text
+    set parts: list of text = []
+    _write(value, parts, _repeat(" ", indent), 0)
+    return parts.join()
+end
+
+do isValid(source: text): bool
+    try
+        parse(source)
+        return true
+    end
+    return false
+end
+
+# Finding Values
+do pick(value: Json, path: text): Json
+    set current = value
+    repeat each step in _split(path)
+        check current
+            is dictionary of Json
+                if step not in current
+                    return nothing
+                end
+                current = current[step]
+            is list of Json
+                set index = 0
+                try
+                    index = number(step)
+                end
+                if index < 1 or index > current.length
+                    return nothing
+                end
+                current = current[index]
+            otherwise
+                return nothing
+        end
+    end
+    return current
+end
+
+do has(value: Json, path: text): bool
+    return pick(value, path) != nothing
+end
+
+# Converting Values
+do asText(value: Json): text
+    if value is text
+        return value
+    end
+    fail "json: expected text, got {kindOf(value)}"
+end
+
+do asNumber(value: Json): number
+    if value is number
+        return value
+    end
+    if value is decimal
+        return round(value)
+    end
+    fail "json: expected a number, got {kindOf(value)}"
+end
+
+do asDecimal(value: Json): decimal
+    if value is decimal
+        return value
+    end
+    if value is number
+        return decimal(value)
+    end
+    fail "json: expected a decimal, got {kindOf(value)}"
+end
+
+do asBool(value: Json): bool
+    if value is bool
+        return value
+    end
+    fail "json: expected true or false, got {kindOf(value)}"
+end
+
+do asList(value: Json): list of Json
+    if value is list of Json
+        return value
+    end
+    fail "json: expected a list, got {kindOf(value)}"
+end
+
+do asDictionary(value: Json): dictionary of Json
+    if value is dictionary of Json
+        return value
+    end
+    fail "json: expected a dictionary, got {kindOf(value)}"
+end
+
+do kindOf(value: Json): text
+    check value
+        is nothing
+            return "null"
+        is bool
+            return "bool"
+        is number
+            return "number"
+        is decimal
+            return "decimal"
+        is text
+            return "text"
+        is list of Json
+            return "list"
+        is dictionary of Json
+            return "dictionary"
+    end
+    return "unknown"
+end

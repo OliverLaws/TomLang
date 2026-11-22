@@ -1,0 +1,179 @@
+# Windows Calls
+dll "kernel32"
+    do _systemTimeAsFileTime(fileTime: number) as "GetSystemTimeAsFileTime"
+    do _localTime(systemTime: number) as "GetLocalTime"
+    do _systemTime(systemTime: number) as "GetSystemTime"
+    do _queryCounter(counter: number): bool as "QueryPerformanceCounter"
+    do _queryFrequency(frequency: number): bool as "QueryPerformanceFrequency"
+    do _sleep(milliseconds: uint) as "Sleep"
+end
+
+# Date Record
+record DateTime
+    year: number
+    month: number
+    day: number
+    hour: number
+    minute: number
+    second: number
+    millisecond: number
+    weekday: number
+end
+
+# Private Helpers
+keep _TicksPerSecond = 10000000
+keep _SecondsTo1970 = 11644473600
+keep _SecondsPerDay = 86400
+
+do _fileTimeTicks(): number
+    set box = memory(8)
+    later freeMemory(box)
+    _systemTimeAsFileTime(box)
+    return read64(box)
+end
+
+do _readDateTime(box: number): DateTime
+    return DateTime(year: read16(box), month: read16(box + 2), weekday: read16(box + 4), day: read16(box + 6), hour: read16(box + 8), minute: read16(box + 10), second: read16(box + 12), millisecond: read16(box + 14))
+end
+
+do _daysFromDate(year: number, month: number, day: number): number
+    set y = year - 1 if month <= 2 otherwise year
+    set era = y // 400
+    set yearOfEra = y - era * 400
+    set shifted = month - 3 if month > 2 otherwise month + 9
+    set dayOfYear = (153 * shifted + 2) // 5 + day - 1
+    set dayOfEra = yearOfEra * 365 + yearOfEra // 4 - yearOfEra // 100 + dayOfYear
+    return era * 146097 + dayOfEra - 719468
+end
+
+# Clocks & Benchmarking
+do nowSeconds(): number
+    return _fileTimeTicks() // _TicksPerSecond - _SecondsTo1970
+end
+
+do nowMilliseconds(): number
+    return _fileTimeTicks() // 10000 - _SecondsTo1970 * 1000
+end
+
+do clock(): decimal
+    set box = memory(8)
+    later freeMemory(box)
+    _queryCounter(box)
+    set ticks = read64(box)
+    _queryFrequency(box)
+    return decimal(ticks) / decimal(read64(box))
+end
+
+do clockMilliseconds(): decimal
+    return clock() * 1000.0
+end
+
+do secondsSince(startSeconds: decimal): decimal
+    return clock() - startSeconds
+end
+
+do millisecondsSince(startMilliseconds: decimal): decimal
+    return clockMilliseconds() - startMilliseconds
+end
+
+# Sleep
+do sleepSeconds(seconds: decimal)
+    sleepMilliseconds(round(seconds * 1000.0))
+end
+
+do sleepMilliseconds(milliseconds: number)
+    if milliseconds > 0
+        _sleep(milliseconds)
+    end
+end
+
+# Date & Time
+do nowLocal(): DateTime
+    set box = memory(16)
+    later freeMemory(box)
+    _localTime(box)
+    return _readDateTime(box)
+end
+
+do nowUtc(): DateTime
+    set box = memory(16)
+    later freeMemory(box)
+    _systemTime(box)
+    return _readDateTime(box)
+end
+
+do fromUnixSeconds(seconds: number): DateTime
+    set days = seconds // _SecondsPerDay
+    set secondOfDay = seconds - days * _SecondsPerDay
+
+    set shiftedDays = days + 719468
+    set era = shiftedDays // 146097
+    set dayOfEra = shiftedDays - era * 146097
+    set yearOfEra = (dayOfEra - dayOfEra // 1460 + dayOfEra // 36524 - dayOfEra // 146096) // 365
+    set dayOfYear = dayOfEra - (365 * yearOfEra + yearOfEra // 4 - yearOfEra // 100)
+    set monthIndex = (5 * dayOfYear + 2) // 153
+    set day = dayOfYear - (153 * monthIndex + 2) // 5 + 1
+    set month = monthIndex + 3 if monthIndex < 10 otherwise monthIndex - 9
+    set year = yearOfEra + era * 400 + (1 if month <= 2 otherwise 0)
+
+    return DateTime(year: year, month: month, day: day, hour: secondOfDay // 3600, minute: secondOfDay % 3600 // 60, second: secondOfDay % 60, millisecond: 0, weekday: (days + 4) % 7)
+end
+
+do toUnixSeconds(dateTime: DateTime): number
+    set days = _daysFromDate(dateTime.year, dateTime.month, dateTime.day)
+    return days * _SecondsPerDay + dateTime.hour * 3600 + dateTime.minute * 60 + dateTime.second
+end
+
+# Formatting
+do formatDate(dateTime: DateTime): text
+    return "{dateTime.year}-{dateTime.month:2 digits}-{dateTime.day:2 digits}"
+end
+
+do formatUkDate(dateTime: DateTime): text
+    return "{dateTime.day:2 digits}/{dateTime.month:2 digits}/{dateTime.year}"
+end
+
+do formatTime(dateTime: DateTime): text
+    return "{dateTime.hour:2 digits}:{dateTime.minute:2 digits}:{dateTime.second:2 digits}"
+end
+
+do formatIso(dateTime: DateTime): text
+    return formatDate(dateTime) + "T" + formatTime(dateTime)
+end
+
+do formatDuration(seconds: decimal): text
+    if seconds < 1.0
+        return "{seconds * 1000.0:1 places}ms"
+    end
+    if seconds < 60.0
+        return "{seconds:1 places}s"
+    end
+    set whole = round(seconds)
+    set hours = whole // 3600
+    set minutes = whole % 3600 // 60
+    set secs = whole % 60
+    if hours > 0
+        return "{hours}h {minutes}m {secs}s"
+    end
+    return "{minutes}m {secs}s"
+end
+
+do weekdayName(dateTime: DateTime): text
+    return ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dateTime.weekday + 1]
+end
+
+do monthName(dateTime: DateTime): text
+    return ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][dateTime.month]
+end
+
+# Calendar Helpers
+do isLeapYear(year: number): bool
+    return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
+end
+
+do daysInMonth(year: number, month: number): number
+    if month == 2 and isLeapYear(year)
+        return 29
+    end
+    return [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month]
+end

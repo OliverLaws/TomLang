@@ -86,6 +86,26 @@ extern PrimLocalSet
 extern PrimBranch
 extern PrimBranch0
 extern PrimBye
+extern PrimBox
+extern PrimUnbox
+extern PrimTagIs
+extern PrimGetG
+extern PrimSetG
+extern PrimIncG
+extern PrimIncL
+extern PrimTextLength
+extern PrimTextChars
+extern PrimFfiCallPtr
+extern PrimMakeMapInt
+extern PrimMapGetInt
+extern PrimMapSetInt
+extern PrimMapHasInt
+extern PrimEnterHeap
+extern PrimReturnHeap
+extern PrimFetchOff
+extern PrimStoreOff
+extern PrimReorder
+extern PrimDPow
 extern PrimLinkGet
 extern PrimLinkSet
 extern PrimPushFrame
@@ -120,10 +140,21 @@ extern PrimLength
 extern TypeKind
 extern ListOf
 extern MapOf
+extern UnionOf2
+extern UnionWithout
+extern UnionHas
+extern MapKeyed
+extern KeyOf
 extern ElemOf
 extern InternRecord
 extern FindField
 extern FieldCount
+extern FieldInfo
+extern NewRecordType
+extern NewPlaceholder
+extern PrimMakeIface
+extern PrimJoin
+extern PrimIfaceCall
 extern NewEnum
 extern FuncOf
 extern PrimCallValue
@@ -133,12 +164,19 @@ extern PrimTryEnd
 extern PrimLastError
 extern DictHere
 extern CurFile
+extern FilePath
+extern SysCurrentDir
+extern FileCount
 extern TryForward
+extern TryForwardVar
 extern PrimMissingFn
 extern EnterInstanceSpace
 extern LeaveInstanceSpace
 extern TypeTable
 global KindWord
+global RecordWord
+global InterfaceWord
+global TypeWord
 global DllWord
 global InstanceDepth
 global PreScanActive
@@ -146,12 +184,21 @@ global PreScanFail
 global EmitGlobalInits
 global NestDepth
 global NestHeaderDone
+global NestFloor
 global NestAbort
 global PreDeclare
+global PreHandler
+global NoteForwardVar
+global LookupVar
+global FullForward
+global NoteStmt
+extern SetWord
+extern KeepWord
 extern VarTypeOf
 extern SaveMain
 extern RestoreMain
 extern SetMainFile
+extern ForwardOps
 extern SourceStart
 extern SourceEnd
 extern SavedHere
@@ -218,6 +265,9 @@ extern PrimShiftRight
 %define TNone 0
 %define TNum  1
 %define TText 2
+%define TNil 5
+%define KUnion 11
+%define KNil 12
 %define TBool 3
 %define TDec  4
 
@@ -227,9 +277,28 @@ extern PrimShiftRight
 %define KEnum 8
 %define KFunc 9
 %define KVar  10
+%define KIface 13
 
-%define MaxLocals 64
-%define LFrame 2416
+%define MaxLocals 1024
+%define LfCount (MaxLocals * 40 + 0)
+%define LfInFn (MaxLocals * 40 + 8)
+%define LfSig (MaxLocals * 40 + 16)
+%define LfFrame (MaxLocals * 40 + 24)
+%define LfHintCount (MaxLocals * 40 + 32)
+%define LfHintPtr (MaxLocals * 40 + 40)
+%define LfOuter (MaxLocals * 40 + 48)
+%define LfBranch (MaxLocals * 40 + 56)
+%define LfBody (MaxLocals * 40 + 64)
+%define LfJump (MaxLocals * 40 + 72)
+%define LfHere (MaxLocals * 40 + 80)
+%define LfParams (MaxLocals * 40 + 88)
+%define LfLink (MaxLocals * 40 + 96)
+%define LfId (MaxLocals * 40 + 104)
+%define LfHeap (MaxLocals * 40 + 112)
+%define LfScopes (MaxLocals * 40 + 120)
+%define LfInit (MaxLocals * 40 + 128)
+%define LfParent (MaxLocals * 40 + 136)
+%define LFrame (MaxLocals * 40 + 160)
 %define SigCells  67
 %define SigDef    152
 %define SigFlags  280
@@ -305,12 +374,28 @@ __SECT__
     SetType %4
 %endmacro
 
-%macro ArithOp 4
+%macro TryOp 2
+[section .data]
+%%Str: db %1
+%%End:
+__SECT__
+    push rax
+    mov rdx, [rel ExprType]
+    lea rcx, [rel %%Str]
+    mov r8d, %%End - %%Str
+    call TryOverload
+    test eax, eax
+    pop rax
+    jnz %2
+%endmacro
+
+%macro ArithOp 5
 %1:
     push qword [rel ExprType]
     call Advance
     call %2
     pop rax
+    TryOp %5, %%Over
     call NumericPair
     lea rcx, [rel %3]
     cmp rax, TDec
@@ -319,23 +404,28 @@ __SECT__
 %%Emit:
     mov [rel ExprType], rax
     call Compile
+%%Over:
 %endmacro
 
 %include "parser/messages.inc"
 
-MaxForward equ 1024
-NestRegion equ 9
+MaxForward equ 8192
+NestRegion equ 12
+MaxNest equ 32
+MaxScopes equ 64
 ForwardRegion equ 8
+MaxPre equ 16
 
 section .bss
 ParserState:
 AllowTypeVars resq 1
 GenericFound resq 1
 InstanceMode resq 1
-InstanceBindings resq 26
+InstanceBindings resq 27
 DoStart resq 1
 PendingNode resq 1
 FfiLib resq 1
+FfiPtrMode resq 1
 FfiProc resq 1
 FfiSavedHere resq 1
 FfiEntry resq 1
@@ -361,9 +451,22 @@ CurReplacePtr resq 1
 CurReplaceLen resq 1
 ReplaceType resq 1
 LaterCount resq 1
-LaterPos resq 16
+LaterPos resq 64
+LaterBlock resq 64
 HintCount resq 1
 HintPtr   resq 1
+HintFn    resq 1
+NoBar resq 1
+PendingType resq 1
+PendingUsed resq 1
+OrderOp resq 1
+DefNamePtr resq 1
+DefNameLen resq 1
+RecvType  resq 1
+RecvBare  resq 1
+HintType  resq 1
+CurHintType resq 1
+CurHintFn resq 1
 HintOne   resq 1
 CurHintCount resq 1
 CurHintPtr resq 1
@@ -410,41 +513,82 @@ FnInitCell   resq 1
 NestListCount resq 1
 NestList resq 64
 EachIdxPtr resq 1
+NarrowCount resq 1
+NarrowVar resq 32
+NarrowType resq 32
+NarrowLevel resq 32
+NarrowCandVar resq 1
+NarrowCandType resq 1
+NarrowCandHere resq 1
+OrSeen resq 1
+NilCmpVar resq 1
+CheckVars resq 64
+NilCmpType resq 1
+ScopeCount resq 1
+ScopeTab resq 8 * MaxScopes
+CurLinkOff resq 1
+CurFnId resq 1
+CurHeap resq 1
+NestFloor resq 1
 EachIdxLen resq 1
 EachMapVar resq 1
 EachMapType resq 1
+EachMapFull resq 1
+NegCandVar resq 1
+NegCandType resq 1
+NegCandHere resq 1
+NegCandDepth resq 1
+NegCount resq 1
+NegVars resq 4
+NegTypes resq 4
+NegDepths resq 4
+PendLevel resq 1
+AndSeen resq 1
+PrevExit resq 1
+DeadAtEnd resq 1
+PendNarVar resq 1
+PendNarType resq 1
 ParserStateEnd:
 GenericCount resq 1
+CompoundHere resq 1
+ForwardVarCount resq 1
+ForwardVars resq 256
+LaterEmitting resq 1
 InitVarCount resq 1
 InitVars resq 4096
 NestDepth resq 1
 NestInInstance resq 1
 NestPending resq 1
-NestHeaderDone resq 1
-NestLinkOff resq 1
-NestEntry resq 1
-NestVars resq 4
+FnIdCounter resq 1
+NestEntryTab resq MaxNest
+NestDoneTab resq MaxNest
+NestInstTab resq MaxNest
+NestVarTab resq 4 * MaxNest
 alignb 16
-NestSave resb (ParserStateEnd - ParserState)
+NestSaves resb (ParserStateEnd - ParserState) * MaxNest
 MultiCount resq 1
 MultiLast resq 1
 MultiPtr resq 10
 MultiLen resq 10
 MultiBuf resb 256
 ForwardMode resq 1
+PreHandler resq 1
+FullEntry resq 1
+NegSlots resq 64 * 8
+FwdNameBuf resb 256
 PreScanActive resq 1
-PreScanRsp resq 1
+PreScanRspTab resq MaxPre
 ForwardCount resq 1
 ForwardTable resq 3 * MaxForward
-PreScanVars resq 8
+PreScanVarTab resq 8 * MaxPre
 alignb 16
-PreScanSave resb (ParserStateEnd - ParserState)
+PreScanSaves resb (ParserStateEnd - ParserState) * MaxPre
 GenericTable resq 2 * 256
 InstanceDepth resq 1
 SubstFail resq 1
 DotBuf resb 256
 alignb 16
-InstanceSaves resb 8 * ((ParserStateEnd - ParserState) + 256)
+InstanceSaves resb 32 * ((ParserStateEnd - ParserState) + 256)
 
 section .text
 
@@ -461,3 +605,5 @@ section .text
 %include "parser/functions.inc"
 %include "parser/ffi.inc"
 %include "parser/generics.inc"
+%include "parser/scopes.inc"
+%include "parser/methods.inc"

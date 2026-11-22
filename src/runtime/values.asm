@@ -45,6 +45,10 @@ Pow10:
     dq 1000000000, 10000000000, 100000000000, 1000000000000
     dq 10000000000000, 100000000000000, 1000000000000000
     dq 10000000000000000, 100000000000000000, 1000000000000000000
+align 8
+BigDec dq 1.0e15
+TinyDec dq 1.0e-5
+OneDec dq 1.0
 align 16
 SignMask     dq 0x7FFFFFFFFFFFFFFF, 0x7FFFFFFFFFFFFFFF
 Half         dq 0.5
@@ -59,7 +63,7 @@ section .bss
 DecBuf    resb 64
 DecLen    resq 1
 DecNeg    resq 1
-ShowBuf   resb 65536
+ShowBuf   resb 16777216
 ShowLen   resq 1
 FmtBuf    resb 4096
 UIntBuf   resb 32
@@ -125,6 +129,16 @@ FormatDec:
     mov r13d, 1
     andpd xmm0, [rel SignMask]
 .Positive:
+    ucomisd xmm0, [rel BigDec]
+    jae .Huge
+    test rcx, rcx
+    jns .NotTiny
+    xorpd xmm3, xmm3
+    ucomisd xmm0, xmm3
+    je .NotTiny
+    ucomisd xmm0, [rel TinyDec]
+    jb .Tiny
+.NotTiny:
     mov r12, rcx
     mov rbx, rcx
     test rbx, rbx
@@ -198,10 +212,82 @@ FormatDec:
     pop rdi
     pop rbx
     ret
+.Huge:
+    movq rax, xmm0
+    shr rax, 52
+    and eax, 0x7ff
+    cmp eax, 0x7ff
+    je .Special
+    xor ebx, ebx
+    mov rax, 10
+    cvtsi2sd xmm1, rax
+.Scale:
+    ucomisd xmm0, xmm1
+    jb .Scaled
+    divsd xmm0, xmm1
+    inc rbx
+    jmp .Scale
+.Scaled:
+    cmp rcx, 10
+    jle .SciPrec
+    mov ecx, 10
+.SciPrec:
+    push rbx
+    push rbx
+    call FormatDec
+    pop rbx
+    pop rbx
+    lea rdi, [rel DecBuf]
+    add rdi, [rel DecLen]
+    mov word [rdi], 'e+'
+    add rdi, 2
+    mov rax, rbx
+    call WriteUInt
+    jmp .Finish
+.Tiny:
+    xor ebx, ebx
+    mov rax, 10
+    cvtsi2sd xmm1, rax
+.TinyScale:
+    ucomisd xmm0, [rel OneDec]
+    jae .TinyScaled
+    mulsd xmm0, xmm1
+    inc rbx
+    jmp .TinyScale
+.TinyScaled:
+    push rbx
+    push rbx
+    mov rcx, -1
+    call FormatDec
+    pop rbx
+    pop rbx
+    lea rdi, [rel DecBuf]
+    add rdi, [rel DecLen]
+    mov word [rdi], 'e-'
+    add rdi, 2
+    mov rax, rbx
+    call WriteUInt
+    jmp .Finish
+.Special:
+    lea rdi, [rel DecBuf]
+    movq rax, xmm0
+    shl rax, 12
+    jnz .NaN
+    mov dword [rdi], 'infi'
+    mov dword [rdi + 4], 'nity'
+    add rdi, 8
+    jmp .Finish
+.NaN:
+    mov dword [rdi], 'nan'
+    add rdi, 3
+    xor r13d, r13d
+    jmp .Finish
 
 ParseDecimalText:
+    push rbx
+    push rsi
     xor eax, eax
-    xor r8d, r8d
+    xor ebx, ebx
     xor r9d, r9d
     xor r10d, r10d
     xor r11d, r11d
@@ -217,29 +303,102 @@ ParseDecimalText:
     jz .Build
     movzx r8d, byte [rcx]
     cmp r8b, '.'
-    jne .Digit
+    jne .NotDot
     mov r10d, 1
     jmp .Next
-.Digit:
+.NotDot:
+    cmp r8b, 'e'
+    je .Exp
+    cmp r8b, 'E'
+    je .Exp
     sub r8d, '0'
     cmp r8d, 9
     ja .Build
-    cmp r9, 17
-    jae .Next
+    cmp r9, 18
+    jae .Extra
     imul rax, rax, 10
     add rax, r8
+    test rax, rax
+    jz .Lead
+    inc r9
+.Lead:
     test r10, r10
     jz .Next
-    inc r9
+    dec rbx
+    jmp .Next
+.Extra:
+    test r10, r10
+    jnz .Next
+    inc rbx
 .Next:
     inc rcx
     dec rdx
     jmp .Loop
+.Exp:
+    inc rcx
+    dec rdx
+    xor esi, esi
+    xor r10d, r10d
+    test rdx, rdx
+    jz .ExpDone
+    cmp byte [rcx], '+'
+    je .ExpSign
+    cmp byte [rcx], '-'
+    jne .ExpLoop
+    mov r10d, 1
+.ExpSign:
+    inc rcx
+    dec rdx
+.ExpLoop:
+    test rdx, rdx
+    jz .ExpDone
+    movzx r8d, byte [rcx]
+    sub r8d, '0'
+    cmp r8d, 9
+    ja .ExpDone
+    cmp rsi, 100000
+    jae .ExpSkip
+    imul rsi, rsi, 10
+    add rsi, r8
+.ExpSkip:
+    inc rcx
+    dec rdx
+    jmp .ExpLoop
+.ExpDone:
+    test r10, r10
+    jz .ExpAdd
+    neg rsi
+.ExpAdd:
+    add rbx, rsi
 .Build:
     cvtsi2sd xmm0, rax
     lea rcx, [rel Pow10]
-    cvtsi2sd xmm1, qword [rcx + r9 * 8]
+.Up:
+    cmp rbx, 0
+    jle .Down
+    mov r8, rbx
+    cmp r8, 18
+    jbe .UpStep
+    mov r8, 18
+.UpStep:
+    cvtsi2sd xmm1, qword [rcx + r8 * 8]
+    mulsd xmm0, xmm1
+    sub rbx, r8
+    jmp .Up
+.Down:
+    cmp rbx, 0
+    jge .Sign
+    mov r8, rbx
+    neg r8
+    cmp r8, 18
+    jbe .DownStep
+    mov r8, 18
+.DownStep:
+    cvtsi2sd xmm1, qword [rcx + r8 * 8]
     divsd xmm0, xmm1
+    add rbx, r8
+    jmp .Down
+.Sign:
     test r11, r11
     jz .Done
     xorpd xmm1, xmm1
@@ -247,6 +406,8 @@ ParseDecimalText:
     movapd xmm0, xmm1
 .Done:
     movq rax, xmm0
+    pop rsi
+    pop rbx
     ret
 
 PrimToDec:
@@ -399,11 +560,39 @@ PrimTextToDec:
     inc r8
     cmp eax, '.'
     je .Dot
+    cmp eax, 'e'
+    je .ExpMark
+    cmp eax, 'E'
+    je .ExpMark
     sub eax, '0'
     cmp eax, 9
     ja .Bad
     inc r10
     jmp .Scan
+.ExpMark:
+    test r10, r10
+    jz .Bad
+    cmp r8, rdx
+    jae .Bad
+    movzx eax, byte [rcx + r8]
+    cmp eax, '+'
+    je .ExpSigned
+    cmp eax, '-'
+    jne .ExpDigits
+.ExpSigned:
+    inc r8
+.ExpDigits:
+    cmp r8, rdx
+    jae .Bad
+.ExpScan:
+    cmp r8, rdx
+    jae .Scanned
+    movzx eax, byte [rcx + r8]
+    inc r8
+    sub eax, '0'
+    cmp eax, 9
+    ja .Bad
+    jmp .ExpScan
 .Dot:
     inc r9
     cmp r9, 1
@@ -412,8 +601,6 @@ PrimTextToDec:
 .Scanned:
     test r10, r10
     jz .Bad
-    cmp r10, 18
-    ja .Bad
     call ParseDecimalText
     DPush rax
     NEXT
@@ -462,7 +649,7 @@ ShowAppend:
 .Loop:
     cmp r9, rdx
     jae .Done
-    cmp rdi, 65000
+    cmp rdi, 16777000
     jae .Done
     mov al, [rcx + r9]
     mov [r8 + rdi], al
@@ -514,6 +701,12 @@ ShowValue:
     je .Rec
     cmp rax, KEnum
     je .Enum
+    cmp rax, 11
+    je .Union
+    cmp rax, 13
+    je .Union
+    cmp rax, 12
+    je .Nothing
     cmp rax, KFunc
     je .Func
     ShowLit "?"
@@ -620,7 +813,11 @@ ShowValue:
 .MapItem:
     mov rax, [rbx + 16]
     mov rax, [rax + r12 * 8]
+    mov rcx, [rdi + 16]
+    test rcx, rcx
+    jnz .KeyType
     mov ecx, KText
+.KeyType:
     mov edx, 1
     call ShowValue
     ShowLit ": "
@@ -634,7 +831,48 @@ ShowValue:
 .MapEnd:
     ShowLit "}"
     jmp .Done
+.Nothing:
+    ShowLit "nothing"
+    jmp .Done
+.Union:
+    test rbx, rbx
+    jz .Nothing
+    mov rcx, [rbx]
+    mov rax, [rbx + 8]
+    mov rdx, r13
+    call ShowValue
+    jmp .Done
 .Rec:
+    cmp qword [rdi + 16], 0
+    je .RecNamed
+    mov rsi, [rdi + 24]
+    cmp qword [rsi + 8], 1
+    jne .RecNamed
+    mov rax, [rsi]
+    cmp byte [rax], '1'
+    jne .RecNamed
+    ShowLit "("
+    xor r12d, r12d
+.TupLoop:
+    cmp r12, [rdi + 16]
+    jae .TupEnd
+    test r12, r12
+    jz .TupItem
+    ShowLit ", "
+.TupItem:
+    lea rax, [r12 + r12 * 2]
+    mov rsi, [rdi + 24]
+    lea rsi, [rsi + rax * 8]
+    mov rax, [rbx + r12 * 8]
+    mov rcx, [rsi + 16]
+    mov edx, 1
+    call ShowValue
+    inc r12
+    jmp .TupLoop
+.TupEnd:
+    ShowLit ")"
+    jmp .Done
+.RecNamed:
     ShowLit "{"
     xor r12d, r12d
 .RecLoop:

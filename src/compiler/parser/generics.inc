@@ -4,8 +4,8 @@ InstanceStarted:
     mov rcx, [rel PendingNode]
     test rcx, rcx
     jz .Done
-    mov [rcx + 216], rax
-    mov rdx, [rcx + 224]
+    mov [rcx + 224], rax
+    mov rdx, [rcx + 232]
     mov r8, [rdx + 48]
     mov [rcx], r8
     mov [rdx + 48], rcx
@@ -137,14 +137,19 @@ Subst:
     pop rbx
     ret
 .Map:
+    push rax
     mov rcx, rax
     call ElemOf
     call Subst
+    pop rcx
     test rax, rax
     jz .Ret
     push rbx
-    mov rcx, rax
-    call MapOf
+    push rax
+    call KeyOf
+    mov rdx, rax
+    pop rcx
+    call MapKeyed
     pop rbx
     ret
 .Func:
@@ -213,6 +218,14 @@ Unify:
     je .Ok
     Fail ErrGenericBoth
 .Bind:
+    cmp rcx, 26
+    jne .BindOk
+    cmp rdx, TNum
+    je .BindOk
+    cmp rdx, TDec
+    je .BindOk
+    Fail ErrNumericType
+.BindOk:
     mov [rbx + rcx * 8], rdx
     ret
 .Elem:
@@ -307,7 +320,7 @@ GetInstance:
     jz .New
     xor ecx, ecx
 .Cmp:
-    cmp ecx, 26
+    cmp ecx, 27
     je .Found
     mov rax, [rsi + 8 + rcx * 8]
     cmp rax, [r12 + rcx * 8]
@@ -318,17 +331,17 @@ GetInstance:
     mov rsi, [rsi]
     jmp .Node
 .Found:
-    mov rax, [rsi + 216]
+    mov rax, [rsi + 224]
     jmp .Out
 .New:
-    cmp qword [rel InstanceDepth], 8
+    cmp qword [rel InstanceDepth], 32
     jae .Deep
-    mov ecx, 232
+    mov ecx, 240
     call PermAlloc
     mov rsi, rax
     xor ecx, ecx
 .Copy:
-    cmp ecx, 26
+    cmp ecx, 27
     je .Copied
     mov rax, [r12 + rcx * 8]
     mov [rsi + 8 + rcx * 8], rax
@@ -336,14 +349,14 @@ GetInstance:
     jmp .Copy
 .Copied:
     mov qword [rsi], 0
-    mov qword [rsi + 216], 0
-    mov [rsi + 224], rbx
+    mov qword [rsi + 224], 0
+    mov [rsi + 232], rbx
     push rsi
     mov [rel PendingNode], rsi
     mov rcx, rbx
     call CompileInstance
     pop rsi
-    mov rax, [rsi + 216]
+    mov rax, [rsi + 224]
 .Out:
     pop r12
     pop rdi
@@ -396,7 +409,7 @@ CompileInstance:
     mov rsi, [rel PendingNode]
     add rsi, 8
     lea rdi, [rel InstanceBindings]
-    mov ecx, 26
+    mov ecx, 27
     rep movsq
     mov qword [rel InstanceMode], 1
     mov qword [rel AllowTypeVars], 0
@@ -413,6 +426,9 @@ CompileInstance:
     mov qword [rel LaterCount], 0
     mov qword [rel ReplaceLen], 0
     mov qword [rel NestListCount], 0
+    mov qword [rel ScopeCount], 0
+    mov rax, [rel NestDepth]
+    mov [rel NestFloor], rax
     mov rcx, [rel InstanceDepth]
     call EnterInstanceSpace
     inc qword [rel InstanceDepth]
@@ -487,18 +503,24 @@ ParseAnyStatement:
     jz .Expr
     cmp rdx, 2
     jne .Expr
+    push rax
+    mov rcx, rax
+    call NoteStmt
+    pop rax
     mov [rel PrevTokPtr], r12
     mov [rel TokPtr], r12
     mov [rel TokLen], r13
     jmp rax
 .Expr:
+    xor ecx, ecx
+    call NoteStmt
     mov ecx, 1
     jmp StmtExpr
 .Missing:
     Fail ErrGenericEnd
 
 CallHint:
-    cmp qword [rsp + 8 + 912], 0
+    cmp qword [rsp + 8 + 928], 0
     je SetHint
     push rbx
     lea rbx, [rsp + 16 + 704]
@@ -510,7 +532,7 @@ CallHint:
 CallUnify:
     push rbx
     lea rbx, [rsp + 16 + 704]
-    mov rax, [rsp + 16 + 920]
+    mov rax, [rsp + 16 + 936]
     mov r10, rax
     btr rax, 40
     mov rdx, [rsp + 16 + 640]
@@ -551,7 +573,7 @@ CallInstance:
     mov rdx, rbx
     call GetInstance
     mov [rsp + 24 + 640], rax
-    mov qword [rsp + 24 + 912], 0
+    mov qword [rsp + 24 + 928], 0
     pop r12
     pop rbx
     ret

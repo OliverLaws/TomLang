@@ -60,6 +60,9 @@ ParamTypeOf:
 CheckArg:
     test rax, rax
     jz .Ok
+    push rax
+    call CoerceTo
+    pop rax
     mov rdx, [rel ExprType]
     cmp rax, rdx
     je .Ok
@@ -77,6 +80,12 @@ CheckArg:
     cmp rax, rcx
     je .Ok
 .Bad:
+    mov rax, [rel ExprType]
+    cmp rax, TNil
+    je TypeError
+    call KindOfType
+    cmp rax, KUnion
+    je TypeError
     Fail ErrArgType
 
 FuncTypeOfSig:
@@ -101,7 +110,9 @@ FuncTypeOfSig:
     ret
 
 SetHint:
+    mov [rel HintType], rax
     mov qword [rel HintCount], 0
+    mov qword [rel HintFn], 0
     test rax, rax
     jz .Done
     push rax
@@ -110,6 +121,7 @@ SetHint:
     pop rcx
     cmp rax, KFunc
     jne .Done
+    mov [rel HintFn], rcx
     shl rcx, 5
     lea rax, [rel TypeTable]
     mov rdx, [rax + rcx + 16]
@@ -194,13 +206,70 @@ UnwindLambdas:
     test r8, r8
     jz .Done
 .Find:
-    mov rax, [r8 + 2096]
+    mov rax, [r8 + LfOuter]
     test rax, rax
     jz .Got
     mov r8, rax
     jmp .Find
 .Got:
-    lea rsi, [r8]
+    mov rcx, r8
+    call LambdaRestore
+    cmp qword [r8 + LfJump], 0
+    jne .Cleared
+    mov rax, [r8 + LfHere]
+    mov [rel Here], rax
+.Cleared:
+    mov qword [rel OuterFrame], 0
+.Done:
+    ret
+
+LambdaSave:
+    push rsi
+    push rdi
+    mov rdi, rcx
+    lea rsi, [rel LocalPtr]
+    mov ecx, MaxLocals
+    rep movsq
+    lea rsi, [rel LocalLen]
+    mov ecx, MaxLocals
+    rep movsq
+    lea rsi, [rel LocalType]
+    mov ecx, MaxLocals
+    rep movsq
+    lea rsi, [rel LocalConst]
+    mov ecx, MaxLocals
+    rep movsq
+    lea rsi, [rel LocalInit]
+    mov ecx, MaxLocals
+    rep movsq
+    sub rdi, LfCount
+    mov rax, [rel LocalCount]
+    mov [rdi + LfCount], rax
+    mov rax, [rel InFn]
+    mov [rdi + LfInFn], rax
+    mov rax, [rel FnSig]
+    mov [rdi + LfSig], rax
+    mov rax, [rel FnFrameSlot]
+    mov [rdi + LfFrame], rax
+    mov rax, [rel CurLinkOff]
+    mov [rdi + LfLink], rax
+    mov rax, [rel CurFnId]
+    mov [rdi + LfId], rax
+    mov rax, [rel CurHeap]
+    mov [rdi + LfHeap], rax
+    mov rax, [rel ScopeCount]
+    mov [rdi + LfScopes], rax
+    mov rax, [rel FnInitCell]
+    mov [rdi + LfInit], rax
+    pop rdi
+    pop rsi
+    ret
+
+LambdaRestore:
+    push rsi
+    push rdi
+    push rcx
+    mov rsi, rcx
     lea rdi, [rel LocalPtr]
     mov ecx, MaxLocals
     rep movsq
@@ -213,153 +282,33 @@ UnwindLambdas:
     lea rdi, [rel LocalConst]
     mov ecx, MaxLocals
     rep movsq
-    mov rax, [r8 + 2048]
+    lea rdi, [rel LocalInit]
+    mov ecx, MaxLocals
+    rep movsq
+    pop rsi
+    mov rax, [rsi + LfCount]
     mov [rel LocalCount], rax
-    mov rax, [r8 + 2056]
+    mov rax, [rsi + LfInFn]
     mov [rel InFn], rax
-    mov rax, [r8 + 2064]
+    mov rax, [rsi + LfSig]
     mov [rel FnSig], rax
-    mov rax, [r8 + 2072]
+    mov rax, [rsi + LfFrame]
     mov [rel FnFrameSlot], rax
-    cmp qword [r8 + 2128], 0
-    jne .Cleared
-    mov rax, [r8 + 2136]
-    mov [rel Here], rax
-.Cleared:
-    mov qword [rel OuterFrame], 0
-.Done:
+    mov rax, [rsi + LfLink]
+    mov [rel CurLinkOff], rax
+    mov rax, [rsi + LfId]
+    mov [rel CurFnId], rax
+    mov rax, [rsi + LfHeap]
+    mov [rel CurHeap], rax
+    mov rax, [rsi + LfScopes]
+    mov [rel ScopeCount], rax
+    mov rax, [rsi + LfInit]
+    mov [rel FnInitCell], rax
+    pop rdi
+    pop rsi
     ret
-
-CaptureFind:
-    cmp qword [r12 + 2056], 0
-    je .None
-    mov r9, [r12 + 2048]
-.Search:
-    test r9, r9
-    jz .Up
-    dec r9
-    mov rdx, [rel TokLen]
-    cmp rdx, [r12 + 512 + r9 * 8]
-    jne .Search
-    mov r10, [r12 + r9 * 8]
-    mov r11, [rel TokPtr]
-    xor ecx, ecx
-.Cmp:
-    cmp rcx, rdx
-    je .Found
-    mov al, [r10 + rcx]
-    cmp al, [r11 + rcx]
-    jne .Search
-    inc rcx
-    jmp .Cmp
-.Found:
-    mov rax, r9
-    ret
-.Up:
-    mov r13, [r12 + 2096]
-    test r13, r13
-    jz .None
-    push r12
-    mov r12, r13
-    call CaptureFind
-    mov r13, r12
-    pop r12
-    cmp rax, -1
-    je .None
-    mov r9, [r12 + 2048]
-    cmp r9, MaxLocals
-    jae .Many
-    cmp qword [r13 + 2144], 16
-    jae .Many
-    mov rcx, [rel TokPtr]
-    mov [r12 + r9 * 8], rcx
-    mov rcx, [rel TokLen]
-    mov [r12 + 512 + r9 * 8], rcx
-    mov rcx, [r13 + 1024 + rax * 8]
-    mov [r12 + 1024 + r9 * 8], rcx
-    mov rcx, [r13 + 1536 + rax * 8]
-    mov [r12 + 1536 + r9 * 8], rcx
-    inc qword [r12 + 2048]
-    mov rcx, [r13 + 2144]
-    mov [r13 + 2152 + rcx * 8], rax
-    mov [r13 + 2280 + rcx * 8], r9
-    inc qword [r13 + 2144]
-    mov rax, r9
-    ret
-.None:
-    mov rax, -1
-    ret
-.Many:
-    Fail ErrCaptureMany
 
 CaptureName:
-    mov r8, [rel OuterFrame]
-    test r8, r8
-    jz .No
-    push r12
-    push r13
-    mov r12, r8
-    call CaptureFind
-    mov r13, r12
-    pop r13
-    pop r12
-    cmp rax, -1
-    je .No
-    mov r8, [rel OuterFrame]
-    cmp qword [r8 + 2144], 16
-    jae CaptureFind.Many
-    push rax
-    mov rcx, [rel TokPtr]
-    mov rdx, [rel TokLen]
-    call AddLocal
-    pop rcx
-    mov r8, [rel OuterFrame]
-    mov r9, [r8 + 1024 + rcx * 8]
-    mov r10, rax
-    shr r10, 3
-    lea r11, [rel LocalType]
-    mov [r11 + r10 * 8], r9
-    mov r9, [r8 + 1536 + rcx * 8]
-    lea r11, [rel LocalConst]
-    mov [r11 + r10 * 8], r9
-    mov rdx, [r8 + 2144]
-    mov [r8 + 2152 + rdx * 8], rcx
-    mov [r8 + 2280 + rdx * 8], r10
-    inc qword [r8 + 2144]
-    ret
-.No:
-    xor eax, eax
-    ret
-
-OuterLocal:
-    mov r8, [rel OuterFrame]
-    test r8, r8
-    jz .No
-    cmp qword [r8 + 2056], 0
-    je .No
-    mov r9, [r8 + 2048]
-    mov rdx, [rel TokLen]
-    mov r11, [rel TokPtr]
-.Loop:
-    test r9, r9
-    jz .No
-    dec r9
-    cmp rdx, [r8 + 512 + r9 * 8]
-    jne .Loop
-    mov r10, [r8 + r9 * 8]
-    xor ecx, ecx
-.Cmp:
-    cmp rcx, rdx
-    je .Yes
-    mov al, [r10 + rcx]
-    cmp al, [r11 + rcx]
-    jne .Loop
-    inc rcx
-    jmp .Cmp
-.Yes:
-    mov eax, 1
-    ret
-.No:
     xor eax, eax
     ret
 
@@ -368,49 +317,38 @@ ParseLambda:
     push rdi
     push rbx
     sub rsp, LFrame
-    mov qword [rsp + 2144], 0
-    lea rsi, [rel LocalPtr]
-    lea rdi, [rsp]
-    mov ecx, MaxLocals
-    rep movsq
-    lea rsi, [rel LocalLen]
-    mov ecx, MaxLocals
-    rep movsq
-    lea rsi, [rel LocalType]
-    mov ecx, MaxLocals
-    rep movsq
-    lea rsi, [rel LocalConst]
-    mov ecx, MaxLocals
-    rep movsq
-    mov rax, [rel LocalCount]
-    mov [rsp + 2048], rax
-    mov rax, [rel InFn]
-    mov [rsp + 2056], rax
-    mov rax, [rel FnSig]
-    mov [rsp + 2064], rax
-    mov rax, [rel FnFrameSlot]
-    mov [rsp + 2072], rax
+    mov rcx, rsp
+    call LambdaSave
     mov rax, [rel CurHintCount]
-    mov [rsp + 2080], rax
+    mov [rsp + LfHintCount], rax
     mov rax, [rel CurHintPtr]
-    mov [rsp + 2088], rax
+    mov [rsp + LfHintPtr], rax
     mov qword [rel HintCount], 0
     mov qword [rel CurHintCount], 0
     mov rax, [rel OuterFrame]
-    mov [rsp + 2096], rax
+    mov [rsp + LfOuter], rax
     mov [rel OuterFrame], rsp
+    mov qword [rsp + LfParent], 0
     cmp qword [rel InFn], 0
-    jne .Inline
-    mov rax, [rel Here]
-    mov [rsp + 2040 + 96], rax
-    mov qword [rsp + 2032 + 96], 0
-    mov rax, [rel DictHere]
-    mov [rel Here], rax
-    jmp .Placed
-.Inline:
+    je .TopLevel
+    mov qword [rsp + LfParent], 1
+    lea rax, [rsp + LfCount]
+    push rax
+    lea rcx, [rsp + 8]
+    lea rdx, [rsp + 8 + MaxLocals * 8]
+    lea r8, [rsp + 8 + MaxLocals * 16]
+    lea r9, [rsp + 8 + MaxLocals * 24]
+    call ScopeAdd
     lea rcx, [rel PrimBranch]
     call EmitJump
-    mov [rsp + 2032 + 96], rax
+    mov [rsp + LfJump], rax
+    jmp .Placed
+.TopLevel:
+    mov rax, [rel Here]
+    mov [rsp + LfHere], rax
+    mov qword [rsp + LfJump], 0
+    mov rax, [rel DictHere]
+    mov [rel Here], rax
 .Placed:
     mov ebx, SigCells
 .Sig:
@@ -422,6 +360,11 @@ ParseLambda:
     mov [rel FnSig], rax
     mov qword [rel InFn], 1
     mov qword [rel LocalCount], 0
+    mov qword [rel CurLinkOff], -1
+    mov qword [rel CurHeap], 0
+    mov qword [rel FnInitCell], 0
+    call NextFnId
+    mov [rel CurFnId], rax
     CompilePrim PrimEnter
     mov rax, [rel Here]
     mov [rel FnFrameSlot], rax
@@ -457,15 +400,34 @@ ParseLambda:
     jmp .ManyLoop
 .Arrow:
     Expect "=>", ErrArrow
+    mov rcx, [rel TokPtr]
+    add rcx, 2
+    call LineHasArrow
+    test eax, eax
+    jz .NoHeap
+    mov qword [rel CurHeap], 1
+    mov rax, [rel FnFrameSlot]
+    lea rcx, [rel PrimEnterHeap]
+    mov [rax - 8], rcx
+.NoHeap:
     mov rax, [rel LocalCount]
     mov r8, [rel FnSig]
     mov [r8 - 16], rax
-    mov [rsp + 2408], rax
+    cmp qword [rsp + LfParent], 0
+    je .NoLink
+    lea rcx, [rel LinkName]
+    mov edx, 6
+    call AddLocal
+    and rax, -8
+    mov [rel CurLinkOff], rax
+.NoLink:
+    mov rax, [rel LocalCount]
+    mov [rsp + LfParams], rax
     lea rcx, [rel PrimBranch]
     call EmitJump
-    mov [rsp + 2112], rax
+    mov [rsp + LfBranch], rax
     mov rax, [rel Here]
-    mov [rsp + 2120], rax
+    mov [rsp + LfBody], rax
     call Advance
     call ParseExpr
     mov rax, [rel ExprType]
@@ -473,22 +435,11 @@ ParseLambda:
     jz TypeError
     mov r8, [rel FnSig]
     mov [r8 - 8], rax
-    CompilePrim PrimReturn
-    mov rax, [rsp + 2112]
+    call EmitReturn
+    mov rax, [rsp + LfBranch]
     mov rdx, [rel Here]
     mov [rax], rdx
-    mov rbx, [rsp + 2144]
-.CapSets:
-    test rbx, rbx
-    jz .ParamSets
-    dec rbx
-    CompilePrim PrimLocalSet
-    mov rcx, [rsp + 2280 + rbx * 8]
-    shl rcx, 3
-    call Compile
-    jmp .CapSets
-.ParamSets:
-    mov rbx, [rsp + 2408]
+    mov rbx, [rsp + LfParams]
 .ParamLoop:
     test rbx, rbx
     jz .Jump
@@ -500,12 +451,12 @@ ParseLambda:
     jmp .ParamLoop
 .Jump:
     CompilePrim PrimBranch
-    mov rcx, [rsp + 2120]
+    mov rcx, [rsp + LfBody]
     call Compile
     mov rax, [rel FnFrameSlot]
     mov rcx, [rel LocalCount]
     mov [rax], rcx
-    mov rax, [rsp + 2032 + 96]
+    mov rax, [rsp + LfJump]
     test rax, rax
     jz .FromDict
     mov rdx, [rel Here]
@@ -514,54 +465,30 @@ ParseLambda:
 .FromDict:
     mov rax, [rel Here]
     mov [rel DictHere], rax
-    mov rax, [rsp + 2040 + 96]
+    mov rax, [rsp + LfHere]
     mov [rel Here], rax
 .Restore:
     mov rbx, [rel FnSig]
-    lea rsi, [rsp]
-    lea rdi, [rel LocalPtr]
-    mov ecx, MaxLocals
-    rep movsq
-    lea rdi, [rel LocalLen]
-    mov ecx, MaxLocals
-    rep movsq
-    lea rdi, [rel LocalType]
-    mov ecx, MaxLocals
-    rep movsq
-    lea rdi, [rel LocalConst]
-    mov ecx, MaxLocals
-    rep movsq
-    mov rax, [rsp + 2048]
-    mov [rel LocalCount], rax
-    mov rax, [rsp + 2056]
-    mov [rel InFn], rax
-    mov rax, [rsp + 2064]
-    mov [rel FnSig], rax
-    mov rax, [rsp + 2072]
-    mov [rel FnFrameSlot], rax
-    mov rax, [rsp + 2096]
+    mov rcx, rsp
+    call LambdaRestore
+    mov rax, [rsp + LfOuter]
     mov [rel OuterFrame], rax
-    mov [rsp + 2104], rbx
-    xor ebx, ebx
-.CapLoads:
-    cmp rbx, [rsp + 2144]
-    jae .CapsLoaded
-    mov rcx, [rsp + 2152 + rbx * 8]
-    shl rcx, 3
-    or rcx, 2
-    call EmitLoad
-    inc rbx
-    jmp .CapLoads
-.CapsLoaded:
-    mov rbx, [rsp + 2104]
+    cmp qword [rsp + LfParent], 0
+    je .Plain
+    cmp qword [rel CurHeap], 0
+    je .NeedHeap
+    CompilePrim PrimPushFrame
     CompilePrim PrimLit
     mov rcx, rbx
     call Compile
-    cmp qword [rsp + 2144], 0
-    je .Plain
-    CompileNum [rsp + 2144]
+    CompileNum 1
     CompilePrim PrimMakeClosure
+    jmp .Typed2
 .Plain:
+    CompilePrim PrimLit
+    mov rcx, rbx
+    call Compile
+.Typed2:
     mov rcx, rbx
     call FuncTypeOfSig
     mov [rel ExprType], rax
@@ -570,6 +497,8 @@ ParseLambda:
     pop rdi
     pop rsi
     ret
+.NeedHeap:
+    Fail ErrScopeFrame
 .Param:
     call IsNameStart
     test eax, eax
@@ -582,9 +511,9 @@ ParseLambda:
     cmp rbx, 16
     jae .TooMany
     mov eax, TNum
-    cmp rbx, [rsp + 8 + 2080]
+    cmp rbx, [rsp + 8 + LfHintCount]
     jae .SetParam
-    mov rax, [rsp + 8 + 2088]
+    mov rax, [rsp + 8 + LfHintPtr]
     mov rax, [rax + rbx * 8]
     test rax, rax
     jnz .SetParam
@@ -624,6 +553,15 @@ ListLoop:
     call Advance
     Expect "(", ErrParen
     call Advance
+    xor ecx, ecx
+    cmp qword [rsp + 56], 1
+    jne .AnyRet
+    mov ecx, TBool
+.AnyRet:
+    mov edx, 1
+    lea r8, [rel HintOne]
+    call FuncOf
+    mov [rel HintFn], rax
     mov qword [rel HintCount], 1
     lea rax, [rel HintOne]
     mov [rel HintPtr], rax

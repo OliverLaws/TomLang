@@ -71,6 +71,9 @@ KindWord:
     mov byte [r8 + 16], 6
     mov rcx, [rsp]
     mov [r8 + 8], rcx
+    shl rcx, 5
+    lea rax, [rel TypeTable]
+    mov [rax + rcx + 8], r8
     call Advance
     Expect "=", ErrKindEq
     xor ebx, ebx

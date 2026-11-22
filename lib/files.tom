@@ -1,0 +1,459 @@
+# Windows Calls
+dll "kernel32"
+    do _create(path: text, access: uint, share: uint, security: number, mode: uint, flags: uint, template: number): number as "CreateFileA"
+    do _read(handle: number, buffer: number, size: uint, done: number, overlapped: number): bool as "ReadFile"
+    do _write(handle: number, data: text, size: uint, done: number, overlapped: number): bool as "WriteFile"
+    do _writeRaw(handle: number, data: number, size: uint, done: number, overlapped: number): bool as "WriteFile"
+    do _size(handle: number, size: number): bool as "GetFileSizeEx"
+    do _close(handle: number): bool as "CloseHandle"
+    do _attributes(path: text): uint as "GetFileAttributesA"
+    do _attributesEx(path: text, level: int, data: number): bool as "GetFileAttributesExA"
+    do _copy(from: text, to: text, failIfExists: bool): bool as "CopyFileA"
+    do _move(from: text, to: text, flags: uint): bool as "MoveFileExA"
+    do _delete(path: text): bool as "DeleteFileA"
+    do _makeFolder(path: text, security: number): bool as "CreateDirectoryA"
+    do _removeFolder(path: text): bool as "RemoveDirectoryA"
+    do _findFirst(pattern: text, data: number): number as "FindFirstFileA"
+    do _currentFolder(size: uint, buffer: number): uint as "GetCurrentDirectoryA"
+    do _findNext(handle: number, data: number): bool as "FindNextFileA"
+    do _findClose(handle: number): bool as "FindClose"
+end
+
+# Private Helpers
+kind _Access = ForReading, ForWriting, ForAppending
+kind _Mode = MustExist, CreateOrWipe, CreateIfMissing
+
+keep _Missing = 4294967295
+keep _FolderFlag = 16
+keep _FindDataSize = 320
+keep _FindNameOffset = 44
+
+do _accessCode(access: _Access): number
+    check access
+        is ForReading
+            return 0x80000000
+        is ForWriting
+            return 0x40000000
+        is ForAppending
+            return 4
+    end
+    return 0
+end
+
+do _modeCode(mode: _Mode): number
+    check mode
+        is MustExist
+            return 3
+        is CreateOrWipe
+            return 2
+        is CreateIfMissing
+            return 4
+    end
+    return 0
+end
+
+do _open(filePath: text, access: _Access, mode: _Mode): number
+    set handle = _create(_resolve(filePath), _accessCode(access), 1, 0, _modeCode(mode), 128, 0)
+    if handle == -1
+        fail "can't open {filePath}"
+    end
+    return handle
+end
+
+do _writeTo(filePath: text, content: text, access: _Access, mode: _Mode)
+    set handle = _open(filePath, access, mode)
+    later _close(handle)
+
+    set done = memory(8)
+    later freeMemory(done)
+    _write(handle, content, byteLength(content), done, 0)
+end
+
+do _isSeparator(character: text): bool
+    return character == "\\" or character == "/"
+end
+
+do _lastSeparator(path: text): number
+    repeat i from path.length to 1 by -1
+        if _isSeparator(path[i])
+            return i
+        end
+    end
+    return 0
+end
+
+do _resolve(path: text): text
+    if mainFolder == "." or isAbsolutePath(path)
+        return path
+    end
+    if path.length > 0 and _isSeparator(path[1])
+        return path
+    end
+    return joinPath([mainFolder, path])
+end
+
+do _splitLines(content: text): list of text
+    set lines: list of text = []
+    set current: list of text = []
+    repeat each character in content
+        if character == "\n"
+            lines.add(current.join())
+            current = []
+        otherwise if character != "\r"
+            current.add(character)
+        end
+    end
+    if current.length > 0
+        lines.add(current.join())
+    end
+    return lines
+end
+
+do _list(folderPath: text, wantFiles: bool, wantFolders: bool): list of text
+    set names: list of text = []
+    set data = memory(_FindDataSize)
+    later freeMemory(data)
+
+    set handle = _findFirst(joinPath([_resolve(folderPath), "*"]), data)
+    if handle == -1
+        fail "can't open folder {folderPath}"
+    end
+    later _findClose(handle)
+
+    repeat forever
+        set name = readText(data + _FindNameOffset)
+        set isFolder = (read32(data) & _FolderFlag) != 0
+        if name != "." and name != ".."
+            if (isFolder and wantFolders) or (not isFolder and wantFiles)
+                names.add(name)
+            end
+        end
+        if not _findNext(handle, data)
+            stop
+        end
+    end
+    return names
+end
+
+# Reading
+do readFile(filePath: text): text
+    set handle = _open(filePath, access: ForReading, mode: MustExist)
+    later _close(handle)
+
+    set sizeBox = memory(8)
+    later freeMemory(sizeBox)
+    _size(handle, sizeBox)
+    set size = read64(sizeBox)
+
+    set buffer = memory(size + 1)
+    later freeMemory(buffer)
+    _read(handle, buffer, size, sizeBox, 0)
+
+    return readText(buffer, size)
+end
+
+do readLines(filePath: text): list of text
+    return _splitLines(readFile(filePath))
+end
+
+do readBytes(filePath: text): list of number
+    set handle = _open(filePath, access: ForReading, mode: MustExist)
+    later _close(handle)
+
+    set sizeBox = memory(8)
+    later freeMemory(sizeBox)
+    _size(handle, sizeBox)
+    set size = read64(sizeBox)
+
+    set buffer = memory(size + 1)
+    later freeMemory(buffer)
+    _read(handle, buffer, size, sizeBox, 0)
+
+    set bytes: list of number = []
+    repeat i from 0 to size - 1
+        bytes.add(readByte(buffer + i))
+    end
+    return bytes
+end
+
+# Writing
+do writeFile(filePath: text, content: text)
+    _writeTo(filePath, content, access: ForWriting, mode: CreateOrWipe)
+end
+
+do appendFile(filePath: text, content: text)
+    _writeTo(filePath, content, access: ForAppending, mode: CreateIfMissing)
+end
+
+do writeLines(filePath: text, lines: list of text)
+    writeFile(filePath, lines.join("\n"))
+end
+
+do writeBytes(filePath: text, bytes: list of number)
+    set handle = _open(filePath, access: ForWriting, mode: CreateOrWipe)
+    later _close(handle)
+
+    set buffer = memory(bytes.length + 1)
+    later freeMemory(buffer)
+    repeat each i, byte in bytes
+        writeByte(buffer + i - 1, byte)
+    end
+
+    set done = memory(8)
+    later freeMemory(done)
+    _writeRaw(handle, buffer, bytes.length, done, 0)
+end
+
+# Checking
+do pathExists(path: text): bool
+    return _attributes(_resolve(path)) != _Missing
+end
+
+do fileExists(filePath: text): bool
+    set flags = _attributes(_resolve(filePath))
+    return flags != _Missing and (flags & _FolderFlag) == 0
+end
+
+do folderExists(folderPath: text): bool
+    set flags = _attributes(_resolve(folderPath))
+    return flags != _Missing and (flags & _FolderFlag) != 0
+end
+
+do fileSizeBytes(filePath: text): number
+    set data = memory(36)
+    later freeMemory(data)
+    if not _attributesEx(_resolve(filePath), 0, data)
+        fail "can't find {filePath}"
+    end
+    set high = read32(data + 28) & 0xFFFFFFFF
+    set low = read32(data + 32) & 0xFFFFFFFF
+    return high * 4294967296 + low
+end
+
+do lastModifiedSeconds(filePath: text): number
+    set data = memory(36)
+    later freeMemory(data)
+    if not _attributesEx(_resolve(filePath), 0, data)
+        fail "can't find {filePath}"
+    end
+    return read64(data + 20) // 10000000 - 11644473600
+end
+
+do isFileEmpty(filePath: text): bool
+    return fileSizeBytes(filePath) == 0
+end
+
+do isFolderEmpty(folderPath: text): bool
+    return listFolderEntries(folderPath).length == 0
+end
+
+# Copying, Moving & Deleting
+do copyFile(sourcePath: text, destinationPath: text)
+    if not _copy(_resolve(sourcePath), _resolve(destinationPath), false)
+        fail "can't copy {sourcePath} to {destinationPath}"
+    end
+end
+
+do moveFile(sourcePath: text, destinationPath: text)
+    if not _move(_resolve(sourcePath), _resolve(destinationPath), 3)
+        fail "can't move {sourcePath} to {destinationPath}"
+    end
+end
+
+do renamePath(currentPath: text, newPath: text)
+    if not _move(_resolve(currentPath), _resolve(newPath), 0)
+        fail "can't rename {currentPath} to {newPath}"
+    end
+end
+
+do deleteFile(filePath: text)
+    if not _delete(_resolve(filePath))
+        fail "can't delete {filePath}"
+    end
+end
+
+# Folders
+do createFolder(folderPath: text)
+    if not folderExists(folderPath) and not _makeFolder(_resolve(folderPath), 0)
+        fail "can't create folder {folderPath}"
+    end
+end
+
+do createFolderTree(folderPath: text)
+    set path = normalisePath(folderPath)
+    repeat i from 1 to path.length
+        if path[i] == "\\" and i > 1 and path[i - 1] != ":"
+            set part = path[1 .. i - 1]
+            if not folderExists(part)
+                createFolder(part)
+            end
+        end
+    end
+    createFolder(path)
+end
+
+do deleteEmptyFolder(folderPath: text)
+    if not _removeFolder(_resolve(folderPath))
+        fail "can't delete folder {folderPath} (is it empty?)"
+    end
+end
+
+do deleteFolderAndContents(folderPath: text)
+    repeat each name in listFilesInFolder(folderPath)
+        deleteFile(joinPath([folderPath, name]))
+    end
+    repeat each name in listFoldersInFolder(folderPath)
+        deleteFolderAndContents(joinPath([folderPath, name]))
+    end
+    deleteEmptyFolder(folderPath)
+end
+
+do listFolderEntries(folderPath: text): list of text
+    return _list(folderPath, true, true)
+end
+
+do listFilesInFolder(folderPath: text): list of text
+    return _list(folderPath, true, false)
+end
+
+do listFoldersInFolder(folderPath: text): list of text
+    return _list(folderPath, false, true)
+end
+
+do listAllFilesRecursive(folderPath: text): list of text
+    set found: list of text = []
+    repeat each name in listFilesInFolder(folderPath)
+        found.add(joinPath([folderPath, name]))
+    end
+    repeat each name in listFoldersInFolder(folderPath)
+        repeat each inner in listAllFilesRecursive(joinPath([folderPath, name]))
+            found.add(inner)
+        end
+    end
+    return found
+end
+
+# Paths
+do joinPath(parts: list of text): text
+    set pieces: list of text = []
+    repeat each i, part in parts
+        set piece = part
+        repeat while piece.length > 0 and _isSeparator(piece[piece.length])
+            piece = piece[1 .. piece.length - 1] if piece.length > 1 otherwise ""
+        end
+        if i > 1
+            repeat while piece.length > 0 and _isSeparator(piece[1])
+                piece = piece[2 .. piece.length] if piece.length > 1 otherwise ""
+            end
+        end
+        if piece.length > 0
+            pieces.add(piece)
+        end
+    end
+    return pieces.join("\\")
+end
+
+do fileName(filePath: text): text
+    set cut = _lastSeparator(filePath)
+    if cut == filePath.length
+        return ""
+    end
+    return filePath[cut + 1 .. filePath.length]
+end
+
+do fileExtension(filePath: text): text
+    set name = fileName(filePath)
+    repeat i from name.length to 2 by -1
+        if name[i] == "."
+            return name[i .. name.length]
+        end
+    end
+    return ""
+end
+
+do fileNameWithoutExtension(filePath: text): text
+    set name = fileName(filePath)
+    set extension = fileExtension(name)
+    if extension.length == 0
+        return name
+    end
+    return name[1 .. name.length - extension.length]
+end
+
+do replaceExtension(filePath: text, newExtension: text): text
+    set extension = fileExtension(filePath)
+    set base = filePath
+    if extension.length > 0
+        base = filePath[1 .. filePath.length - extension.length]
+    end
+    if newExtension.length == 0
+        return base
+    end
+    if newExtension[1] == "."
+        return base + newExtension
+    end
+    return base + "." + newExtension
+end
+
+do parentFolder(path: text): text
+    set cut = _lastSeparator(path)
+    if cut <= 1
+        return ""
+    end
+    return path[1 .. cut - 1]
+end
+
+do normalisePath(path: text): text
+    set slashed: list of text = []
+    repeat each character in path
+        slashed.add("\\" if character == "/" otherwise character)
+    end
+    set full = slashed.join()
+
+    set start = ""
+    if full.length >= 2 and full[2] == ":"
+        start = full[1 .. 2]
+        full = full[3 .. full.length] if full.length > 2 otherwise ""
+    end
+    set rooted = full.length > 0 and full[1] == "\\"
+
+    set kept: list of text = []
+    set current: list of text = []
+    repeat each character in full + "\\"
+        if character == "\\"
+            set part = current.join()
+            current = []
+            if part == ".."
+                if kept.length > 0 and kept[kept.length] != ".."
+                    kept.pop()
+                otherwise if not rooted
+                    kept.add("..")
+                end
+            otherwise if part != "" and part != "."
+                kept.add(part)
+            end
+        otherwise
+            current.add(character)
+        end
+    end
+
+    set result = kept.join("\\")
+    if rooted
+        result = "\\" + result
+    end
+    return start + result
+end
+
+do isAbsolutePath(path: text): bool
+    if path.length >= 3 and path[2] == ":" and _isSeparator(path[3])
+        return true
+    end
+    return path.length >= 2 and _isSeparator(path[1]) and _isSeparator(path[2])
+end
+
+do workingFolder(): text
+    set buffer = memory(1024)
+    later freeMemory(buffer)
+    set size = _currentFolder(1024, buffer)
+    return readText(buffer, size)
+end

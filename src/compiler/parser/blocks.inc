@@ -1,20 +1,54 @@
 IfWord:
     call Advance
+    mov qword [rel NarrowCandVar], 0
+    mov qword [rel NegCandVar], 0
+    mov qword [rel NegCount], 0
+    mov qword [rel AndSeen], 0
+    mov qword [rel OrSeen], 0
     call ParseExpr
     call NeedCondition
+    call NegKeep
+    push rax
+    push 0
+    mov rax, [rel NarrowCandHere]
+    cmp rax, [rel Here]
+    je .MaybeNarrow
+    mov qword [rel NarrowCandVar], 0
+.MaybeNarrow:
+    cmp qword [rel OrSeen], 0
+    je .KeepCand
+    mov qword [rel NarrowCandVar], 0
+.KeepCand:
+    push qword [rel NarrowCandVar]
+    push qword [rel NarrowCandType]
     lea rcx, [rel PrimBranch0]
     call EmitJump
+    pop rdx
+    pop rcx
+    pop r8
+    pop r9
     DPush 0
     DPush rax
-    DPush 0
-    DPush 0
+    DPush r9
+    DPush r8
     DPush TagIf
     inc qword [rel OpenBlocks]
+    push rcx
+    push rdx
+    call NegStore
+    pop rdx
+    pop rcx
+    test rcx, rcx
+    jz .NoNarrow
+    call NarrowPush
+.NoNarrow:
     jmp Pushback
 
 OtherwiseWord:
     cmp qword [rel OpenBlocks], 0
     je .Bad
+    mov rcx, [rel OpenBlocks]
+    call NarrowPopLevel
     cmp qword [r15 - 8], TagIf
     je .IfOk
     cmp qword [r15 - 8], TagCheck
@@ -24,6 +58,35 @@ OtherwiseWord:
     cmp qword [r15 - 8], TagDummy
     jne .Bad
 .IfOk:
+    cmp qword [r15 - 8], TagIf
+    jne .IfNoNeg
+    mov rax, [r15 - 24]
+    test rax, rax
+    jz .NegDone
+    jg .NegCount
+    neg rax
+.NegCount:
+    mov rdx, rax
+    neg rdx
+    mov [r15 - 24], rdx
+    push rbx
+    push rsi
+    mov rsi, rax
+    mov rbx, [rel OpenBlocks]
+    shl rbx, 6
+    lea rax, [rel NegSlots]
+    add rbx, rax
+.NegLoop:
+    mov rcx, [rbx]
+    mov rdx, [rbx + 8]
+    call NarrowPush
+    add rbx, 16
+    dec rsi
+    jnz .NegLoop
+    pop rsi
+    pop rbx
+.NegDone:
+.IfNoNeg:
     lea rcx, [rel PrimBranch]
     call EmitJump
     lea r8, [r15 - 40]
@@ -85,6 +148,8 @@ OtherwiseWord:
 EndWord:
     cmp qword [rel OpenBlocks], 0
     je .Bad
+    mov rcx, [rel OpenBlocks]
+    call NarrowPopLevel
     mov rax, [r15 - 8]
     cmp rax, TagIf
     je .If
@@ -99,7 +164,8 @@ EndWord:
     cmp qword [r15 - 16], 0
     je .Pop
     call DropFn
-    cmp qword [rel NestDepth], 0
+    mov rax, [rel NestDepth]
+    cmp rax, [rel NestFloor]
     je .Pop
     mov qword [rel NestPending], 1
     jmp .Pop
@@ -116,8 +182,16 @@ EndWord:
     mov rdx, [rel Here]
     mov [rcx], rdx
     jmp .Pop
-.Check:
 .If:
+    mov rcx, [r15 - 24]
+    test rcx, rcx
+    jle .Check
+    cmp qword [rel DeadAtEnd], 0
+    je .Check
+    mov [rel PendNarVar], rcx
+    mov rcx, [rel OpenBlocks]
+    mov [rel PendLevel], rcx
+.Check:
     mov rcx, [r15 - 32]
     test rcx, rcx
     jz .NoPending
@@ -141,6 +215,31 @@ EndWord:
     lea rax, [rel PrimAdd]
     and rbx, -2
 .Count:
+    test rbx, 4
+    jnz .SlowCount
+    mov rdx, 1
+    lea rcx, [rel PrimAdd]
+    cmp rax, rcx
+    je .IncDir
+    mov rdx, -1
+.IncDir:
+    push rdx
+    lea rcx, [rel PrimIncL]
+    test rbx, 2
+    jnz .IncKind
+    lea rcx, [rel PrimIncG]
+.IncKind:
+    call Compile
+    mov rcx, rbx
+    test rcx, 2
+    jz .IncAddr
+    and rcx, -8
+.IncAddr:
+    call Compile
+    pop rcx
+    call Compile
+    jmp .NoCounter
+.SlowCount:
     push rax
     mov rcx, rbx
     call EmitLoad
@@ -167,7 +266,7 @@ EndWord:
     cmp rax, TText
     je .NoReturn
     CompileNum 0
-    CompilePrim PrimReturn
+    call EmitReturn
     jmp .FnFinish
 .NoReturn:
     CompilePrim PrimNoReturn
@@ -179,7 +278,8 @@ EndWord:
     call EndDef
     mov qword [rel InFn], 0
     mov qword [rel LocalCount], 0
-    cmp qword [rel NestDepth], 0
+    mov rax, [rel NestDepth]
+    cmp rax, [rel NestFloor]
     jne .NestDone
     call HideNested
     jmp .Pop
@@ -188,6 +288,15 @@ EndWord:
 .Pop:
     sub r15, 40
     dec qword [rel OpenBlocks]
+    mov qword [rel DeadAtEnd], 0
+    mov rcx, [rel PendNarVar]
+    test rcx, rcx
+    jz .NoPend
+    mov qword [rel PendNarVar], 0
+    cmp qword [rel OpenBlocks], 0
+    je .NoPend
+    call NegApply
+.NoPend:
     cmp qword [rel NestPending], 0
     jne NestEnd
     ret
@@ -242,8 +351,32 @@ RepeatWord:
     call Advance
     mov rax, [rel Here]
     push rax
+    mov qword [rel NarrowCandVar], 0
+    mov qword [rel OrSeen], 0
     call ParseExpr
     call NeedCondition
+    mov rcx, [rel NarrowCandVar]
+    test rcx, rcx
+    jz .Cond
+    cmp qword [rel OrSeen], 0
+    jne .NoWhileNarrow
+    mov rax, [rel NarrowCandHere]
+    cmp rax, [rel Here]
+    jne .NoWhileNarrow
+    lea rcx, [rel PrimBranch0]
+    call EmitJump
+    pop rdx
+    DPush rdx
+    DPush rax
+    DPush 0
+    DPush 0
+    DPush TagLoop
+    inc qword [rel OpenBlocks]
+    mov rcx, [rel NarrowCandVar]
+    mov rdx, [rel NarrowCandType]
+    call NarrowPush
+    jmp Pushback
+.NoWhileNarrow:
     jmp .Cond
 .Until:
     call Advance
@@ -295,6 +428,14 @@ RepeatWord:
     call ParseBits
     IfTok "..", .EachRange
     mov rax, [rel ExprType]
+    cmp rax, TText
+    jne .NotText
+    CompilePrim PrimTextChars
+    mov ecx, TText
+    call ListOf
+    mov [rel ExprType], rax
+    jmp .EachList
+.NotText:
     call KindOfType
     cmp rax, KList
     je .EachList
@@ -306,6 +447,8 @@ RepeatWord:
     mov rcx, [rel ExprType]
     call ElemOf
     mov [rel EachMapType], rax
+    mov rcx, [rel ExprType]
+    mov [rel EachMapFull], rcx
     CompilePrim PrimDup
     call NewHidden
     mov [rel EachMapVar], rax
@@ -320,8 +463,12 @@ RepeatWord:
     mov [rel EachIdxLen], rcx
     mov [rsp], rax
 .MapKeys:
+    mov rcx, [rel ExprType]
+    push rcx
     CompilePrim PrimMapKeys
-    mov ecx, TText
+    pop rcx
+    call KeyOf
+    mov rcx, rax
     call ListOf
     mov [rel ExprType], rax
     jmp .EachList2
@@ -415,7 +562,10 @@ RepeatWord:
     call EmitLoad
     mov rcx, [rsp + 24]
     call EmitLoad
-    CompilePrim PrimMapGet
+    mov rcx, [rel EachMapFull]
+    lea rdx, [rel PrimMapGet]
+    lea r8, [rel PrimMapGetInt]
+    call MapOp
     pop rcx
     call EmitStore
 .NoIdx:
@@ -703,3 +853,146 @@ RepeatFrom:
     DPush TagLoop
     inc qword [rel OpenBlocks]
     jmp Pushback
+
+NoteStmt:
+    lea rax, [rel EndWord]
+    cmp rcx, rax
+    jne .NotEnd
+    mov rax, [rel PrevExit]
+    mov [rel DeadAtEnd], rax
+.NotEnd:
+    xor edx, edx
+    lea rax, [rel ReturnWord]
+    cmp rcx, rax
+    je .Exit
+    lea rax, [rel StopWord]
+    cmp rcx, rax
+    je .Exit
+    lea rax, [rel SkipWord]
+    cmp rcx, rax
+    je .Exit
+    lea rax, [rel FailWord]
+    cmp rcx, rax
+    je .Exit
+    lea rax, [rel ByeWord]
+    cmp rcx, rax
+    jne .Set
+.Exit:
+    mov edx, 1
+.Set:
+    mov [rel PrevExit], rdx
+    ret
+
+NegAdd:
+    mov rax, [rel NegCount]
+    cmp rax, 4
+    jae .Full
+    lea rdx, [rel NegVars]
+    mov rcx, [rel NegCandVar]
+    mov [rdx + rax * 8], rcx
+    lea rdx, [rel NegTypes]
+    mov rcx, [rel NegCandType]
+    mov [rdx + rax * 8], rcx
+    lea rdx, [rel NegDepths]
+    mov rcx, [rel NegCandDepth]
+    mov [rdx + rax * 8], rcx
+    inc qword [rel NegCount]
+.Full:
+    ret
+
+NegKeep:
+    xor eax, eax
+    cmp qword [rel AndSeen], 0
+    jne .Done
+    mov rcx, [rel ExprDepth]
+    inc rcx
+    cmp qword [rel OrSeen], 0
+    jne .Or
+    cmp qword [rel NegCount], 0
+    je .Done
+    mov rdx, [rel NegCandHere]
+    cmp rdx, [rel Here]
+    jne .Done
+    cmp rcx, [rel NegCandDepth]
+    jne .Done
+    mov rdx, [rel NegCount]
+    dec rdx
+    lea r8, [rel NegVars]
+    mov r9, [r8 + rdx * 8]
+    mov [r8], r9
+    lea r8, [rel NegTypes]
+    mov r9, [r8 + rdx * 8]
+    mov [r8], r9
+    mov eax, 1
+    ret
+.Or:
+    xor edx, edx
+.Loop:
+    cmp rdx, [rel NegCount]
+    jae .Done
+    lea r8, [rel NegDepths]
+    cmp [r8 + rdx * 8], rcx
+    jne .Next
+    lea r8, [rel NegVars]
+    mov r9, [r8 + rdx * 8]
+    mov [r8 + rax * 8], r9
+    lea r8, [rel NegTypes]
+    mov r9, [r8 + rdx * 8]
+    mov [r8 + rax * 8], r9
+    inc rax
+.Next:
+    inc rdx
+    jmp .Loop
+.Done:
+    ret
+
+NegStore:
+    mov rax, [r15 - 24]
+    test rax, rax
+    jz .None
+    mov rcx, [rel OpenBlocks]
+    cmp rcx, 64
+    jae .Drop
+    shl rcx, 6
+    lea r8, [rel NegSlots]
+    add r8, rcx
+    xor edx, edx
+.Copy:
+    cmp rdx, rax
+    jae .None
+    mov r11, rdx
+    shl r11, 4
+    lea r9, [rel NegVars]
+    mov r10, [r9 + rdx * 8]
+    mov [r8 + r11], r10
+    lea r9, [rel NegTypes]
+    mov r10, [r9 + rdx * 8]
+    mov [r8 + r11 + 8], r10
+    inc rdx
+    jmp .Copy
+.Drop:
+    mov qword [r15 - 24], 0
+.None:
+    ret
+
+NegApply:
+    push rbx
+    push rsi
+    mov rsi, rcx
+    mov rbx, [rel PendLevel]
+    shl rbx, 6
+    lea rax, [rel NegSlots]
+    add rbx, rax
+.Loop:
+    test rsi, rsi
+    jz .Done
+    mov rcx, [rbx]
+    mov rdx, [rbx + 8]
+    call NarrowPush
+    add rbx, 16
+    dec rsi
+    jmp .Loop
+.Done:
+    pop rsi
+    pop rbx
+    ret

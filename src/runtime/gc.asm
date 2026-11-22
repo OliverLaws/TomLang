@@ -2,6 +2,7 @@
 
 global InitHeap
 global Alloc
+extern U8Text
 global PermAlloc
 global Collect
 global StackBase
@@ -146,7 +147,9 @@ Alloc:
     cmp qword [rel InGc], 0
     jne .Try
     push rcx
+    mov qword [rel U8Text], 0
     call Collect
+    mov qword [rel U8Text], 0
     pop rcx
 .Try:
     cmp rcx, 1024
