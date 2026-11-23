@@ -265,6 +265,9 @@ ParseAnd:
     call EmitJump
     push rax
     CompilePrim PrimDrop
+    mov rax, [rsp]
+    lea rcx, [rel PrimAndJump]
+    mov [rax - 16], rcx
     call Advance
     call ParseNot
     pop rcx
@@ -329,6 +332,8 @@ ParseCompare:
 .EqNoNeg:
     cmp rax, 4
     je .EqDone
+    cmp rax, 5
+    je .EqDeep
     cmp rax, 2
     je .EqText
     cmp rax, 3
@@ -338,6 +343,11 @@ ParseCompare:
     ret
 .EqText:
     CompilePrim PrimTextEq
+    SetType TBool
+    ret
+.EqDeep:
+    CompileNum [rel EqType]
+    CompilePrim PrimDeepEq
     SetType TBool
     ret
 .EqDec:
@@ -369,6 +379,8 @@ ParseCompare:
     pop rax
     cmp rax, 4
     je .NeUser
+    cmp rax, 5
+    je .NeDeep
     cmp rax, 2
     je .NeText
     cmp rax, 3
@@ -386,6 +398,9 @@ ParseCompare:
     CompilePrim PrimDNotEq
     SetType TBool
     ret
+.NeDeep:
+    CompileNum [rel EqType]
+    CompilePrim PrimDeepEq
 .NeUser:
     CompileNum 0
     CompilePrim PrimEq
@@ -395,6 +410,18 @@ ParseCompare:
     push qword [rel LastVarRef]
     push qword [rel ExprType]
     call Advance
+    mov rcx, [rsp]
+    call TypeKind
+    cmp rax, KList
+    je .EqHint
+    cmp rax, KMap
+    je .EqHint
+    cmp rax, KUnion
+    jne .EqParse
+.EqHint:
+    mov rax, [rsp]
+    call SetHint
+.EqParse:
     call ParseRange
     pop rax
     TryOp "==", .EqUser
@@ -405,7 +432,8 @@ ParseCompare:
     cmp rdx, TNil
     je .NilCompare
     cmp rax, rdx
-    jne .Mixed
+    jne .MaybeEmpty
+.SameType:
     cmp rax, TText
     je .IsText
     cmp rax, TNum
@@ -417,9 +445,71 @@ ParseCompare:
     push rax
     call KindOfType
     cmp rax, KEnum
+    je .EnumEq
+    cmp rax, KList
+    je .DeepEq
+    cmp rax, KMap
+    je .DeepEq
+    cmp rax, KRec
+    je .DeepEq
+    cmp rax, KUnion
+    je .DeepEq
+    cmp rax, KIface
+    je .DeepEq
     pop rax
-    je .IsInt
     jmp TypeError
+.EnumEq:
+    pop rax
+    jmp .IsInt
+.DeepEq:
+    pop rax
+    mov [rel EqType], rax
+    mov eax, 5
+    ret
+.MaybeEmpty:
+    push rax
+    push rdx
+    mov rcx, rax
+    call TypeKind
+    push rax
+    mov rcx, [rsp + 8]
+    call TypeKind
+    pop r8
+    pop rdx
+    pop rcx
+    cmp rax, r8
+    jne .MixedBack
+    cmp rax, KList
+    je .EmptyCheck
+    cmp rax, KMap
+    jne .MixedBack
+.EmptyCheck:
+    push rcx
+    push rdx
+    call ElemOf
+    pop rdx
+    pop rcx
+    test rax, rax
+    jz .TakeRight
+    push rcx
+    push rdx
+    mov rcx, rdx
+    call ElemOf
+    pop rdx
+    pop rcx
+    test rax, rax
+    jnz .MixedBack
+    mov rax, rcx
+    jmp .DeepEqSet
+.TakeRight:
+    mov rax, rdx
+.DeepEqSet:
+    mov [rel EqType], rax
+    mov eax, 5
+    ret
+.MixedBack:
+    mov rax, rcx
+    jmp .Mixed
 .EqUser:
     add rsp, 8
     mov eax, 4
@@ -496,7 +586,7 @@ ParseCompare:
     jne .OrderEmit
     mov rcx, rsi
 .OrderEmit:
-    call Compile
+    call CompileOp
     SetType TBool
     ret
 .OrderUser:
@@ -606,6 +696,8 @@ ParseCompare:
     push rax
     mov rcx, rax
     call KindOfType
+    cmp rax, KIface
+    je .IsIface
     cmp rax, KUnion
     jne TypeError
     call Advance
@@ -640,6 +732,28 @@ ParseCompare:
 .IsDone:
     SetType TBool
     ret
+.IsIface:
+    call Advance
+    call ParseTypeName
+    push rax
+    call Advance
+    mov rax, [rsp]
+    call KindOfType
+    cmp rax, KRec
+    jne TypeError
+    CompilePrim PrimTagIs
+    mov rcx, [rsp]
+    call Compile
+    pop rdx
+    pop rax
+    pop rcx
+    test rcx, rcx
+    jz .IsDone
+    mov [rel NarrowCandVar], rcx
+    mov [rel NarrowCandType], rdx
+    mov rax, [rel Here]
+    mov [rel NarrowCandHere], rax
+    jmp .IsDone
 
 ParseRange:
     call ParseBits
@@ -705,7 +819,7 @@ ParseSum:
     lea rcx, [rel PrimDAdd]
 .AddEmit:
     mov [rel ExprType], rax
-    call Compile
+    call CompileOp
     jmp .Loop
 .Text:
     push rax
@@ -892,12 +1006,14 @@ ParseAtom:
     test eax, eax
     jnz .TextSlice
     NeedType TNum
+    call EmitIndexFix
     Expect "]", ErrBracket
     call Advance
     CompilePrim PrimTextAt
     SetType TText
     jmp .IndexDone
 .TextSlice:
+    call EmitSliceFix
     Expect "]", ErrBracket
     call Advance
     CompilePrim PrimTextSlice
@@ -911,11 +1027,13 @@ ParseAtom:
     test eax, eax
     jnz .ListSlice
     NeedType TNum
+    call EmitIndexFix
     Expect "]", ErrBracket
     call Advance
     CompilePrim PrimIndex
     jmp .ElemType
 .ListSlice:
+    call EmitSliceFix
     Expect "]", ErrBracket
     call Advance
     CompilePrim PrimListSlice
@@ -949,14 +1067,28 @@ ParseAtom:
     call KindOfType
     cmp rax, KRec
     je .Field
+    cmp qword [rel ExprType], TText
+    jne .NotTextMethod
+    IfTok "split", .TSplit
+    IfTok "upper", .TUpper
+    IfTok "lower", .TLower
+    IfTok "trim", .TTrim
+    IfTok "replace", .TReplace
+    IfTok "contains", .TContains
+    IfTok "startsWith", .TStarts
+    IfTok "endsWith", .TEnds
+.NotTextMethod:
     IfTok "length", .Length
     IfTok "add", .Add
     IfTok "keys", .Keys
     IfTok "filter", .Filter
     IfTok "map", .Map
     IfTok "copy", .Copy
+    IfTok "sort", .Sort
     IfTok "pop", .Pop
-    IfTok "remove", .Remove
+    IfTok "removeAt", .Remove
+    IfTok "remove", .RemoveValue
+    IfTok "get", .MapGetOr
     IfTok "insert", .Insert
     IfTok "join", .Join
 .TryMethod:
@@ -971,6 +1103,34 @@ ParseAtom:
     call NeedList
     call EmptyParens
     CompilePrim PrimListCopy
+    jmp .MethodDone
+.Sort:
+    call NeedList
+    call EmptyParens
+    mov rcx, [rel ExprType]
+    call ElemOf
+    xor ebx, ebx
+    cmp rax, TNum
+    je .SortKind
+    cmp rax, TBool
+    je .SortKind
+    mov ebx, 1
+    cmp rax, TDec
+    je .SortKind
+    mov ebx, 2
+    cmp rax, TText
+    je .SortKind
+    push rax
+    call KindOfType
+    pop rcx
+    xor ebx, ebx
+    cmp rax, KEnum
+    je .SortKind
+    Fail ErrSortType
+.SortKind:
+    CompileNum rbx
+    CompilePrim PrimListSort
+    SetType TNone
     jmp .MethodDone
 .Pop:
     call NeedList
@@ -988,11 +1148,172 @@ ParseAtom:
     call Advance
     call ParseExpr
     NeedType TNum
+    call EmitIndexFix
     Expect ")", ErrParen
     call Advance
     CompilePrim PrimListRemove
     pop rcx
     call ElemOf
+    mov [rel ExprType], rax
+    jmp .MethodDone
+.TextArgs:
+    push rcx
+    push rcx
+    call Advance
+    Expect "(", ErrParen
+    call Advance
+    cmp qword [rsp], 0
+    je .TextArgsEnd
+.TextArgLoop:
+    call ParseExpr
+    NeedType TText
+    dec qword [rsp]
+    jz .TextArgsEnd
+    Expect ",", ErrComma
+    call Advance
+    jmp .TextArgLoop
+.TextArgsEnd:
+    Expect ")", ErrParen
+    call Advance
+    add rsp, 16
+    ret
+.TSplit:
+    mov ecx, 1
+    call .TextArgs
+    CompilePrim PrimTextSplit
+    mov ecx, TText
+    call ListOf
+    mov [rel ExprType], rax
+    jmp .MethodDone
+.TUpper:
+    xor ecx, ecx
+    call .TextArgs
+    CompilePrim PrimTextUpper
+    SetType TText
+    jmp .MethodDone
+.TLower:
+    xor ecx, ecx
+    call .TextArgs
+    CompilePrim PrimTextLower
+    SetType TText
+    jmp .MethodDone
+.TTrim:
+    xor ecx, ecx
+    call .TextArgs
+    CompilePrim PrimTextTrim
+    SetType TText
+    jmp .MethodDone
+.TReplace:
+    mov ecx, 2
+    call .TextArgs
+    CompilePrim PrimTextReplace
+    SetType TText
+    jmp .MethodDone
+.TContains:
+    mov ecx, 1
+    call .TextArgs
+    CompilePrim PrimSwap
+    CompilePrim PrimTextHas
+    SetType TBool
+    jmp .MethodDone
+.TStarts:
+    mov ecx, 1
+    call .TextArgs
+    CompilePrim PrimTextStarts
+    SetType TBool
+    jmp .MethodDone
+.TEnds:
+    mov ecx, 1
+    call .TextArgs
+    CompilePrim PrimTextEnds
+    SetType TBool
+    jmp .MethodDone
+.RemoveValue:
+    mov rax, [rel ExprType]
+    call KindOfType
+    cmp rax, KMap
+    je .MapRemove
+    call NeedList
+    push qword [rel ExprType]
+    call Advance
+    Expect "(", ErrParen
+    call Advance
+    mov rcx, [rsp]
+    call ElemOf
+    push rax
+    push rax
+    call SetHint
+    call ParseExpr
+    pop rax
+    pop rax
+    call CoerceElem
+    Expect ")", ErrParen
+    call Advance
+    pop rcx
+    call ElemOf
+    cmp rax, [rel ExprType]
+    jne TypeError
+    push rax
+    CompilePrim PrimListRemoveValue
+    pop rcx
+    call Compile
+    SetType TBool
+    jmp .MethodDone
+.MapRemove:
+    push qword [rel ExprType]
+    call Advance
+    Expect "(", ErrParen
+    call Advance
+    call ParseExpr
+    mov rcx, [rsp]
+    call KeyOf
+    cmp rax, [rel ExprType]
+    jne TypeError
+    Expect ")", ErrParen
+    call Advance
+    pop rcx
+    lea rdx, [rel PrimMapRemove]
+    lea r8, [rel PrimMapRemoveInt]
+    call MapOp
+    SetType TBool
+    jmp .MethodDone
+.MapGetOr:
+    mov rax, [rel ExprType]
+    call KindOfType
+    cmp rax, KMap
+    jne TypeError
+    push qword [rel ExprType]
+    call Advance
+    Expect "(", ErrParen
+    call Advance
+    call ParseExpr
+    mov rcx, [rsp]
+    call KeyOf
+    cmp rax, [rel ExprType]
+    jne TypeError
+    Expect ",", ErrComma
+    call Advance
+    mov rcx, [rsp]
+    call ElemOf
+    push rax
+    push rax
+    call SetHint
+    call ParseExpr
+    pop rax
+    pop rax
+    call CoerceElem
+    Expect ")", ErrParen
+    call Advance
+    mov rcx, [rsp]
+    call ElemOf
+    cmp rax, [rel ExprType]
+    jne TypeError
+    pop rcx
+    push rax
+    lea rdx, [rel PrimMapGetOr]
+    lea r8, [rel PrimMapGetOrInt]
+    call MapOp
+    pop rax
     mov [rel ExprType], rax
     jmp .MethodDone
 .Insert:
@@ -1045,6 +1366,13 @@ ParseAtom:
     Expect ")", ErrParen
     call Advance
     add rsp, 16
+    call FileZero
+    jz .InsertPlain
+    CompilePrim PrimSwap
+    CompileNum 1
+    CompilePrim PrimAdd
+    CompilePrim PrimSwap
+.InsertPlain:
     CompilePrim PrimListInsert
     SetType TNone
     ret

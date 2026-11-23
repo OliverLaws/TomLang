@@ -119,7 +119,7 @@ NextToken:
     cmp r11, r9
     jae .Done
     cmp byte [r8], '.'
-    jne .Done
+    jne .SignedExp
     mov cl, [r11]
     cmp cl, '0'
     jb .Done
@@ -131,11 +131,76 @@ NextToken:
     jae .Done
     mov cl, [r8]
     cmp cl, '0'
+    jb .ExpMark
+    cmp cl, '9'
+    ja .ExpMark
+    inc r8
+    jmp .Fraction
+.ExpMark:
+    or cl, 32
+    cmp cl, 'e'
+    jne .Done
+    lea r11, [r8 + 1]
+    cmp r11, r9
+    jae .Done
+    mov cl, [r11]
+    cmp cl, '+'
+    je .ExpSign
+    cmp cl, '-'
+    je .ExpSign
+    jmp .ExpFirst
+.ExpSign:
+    inc r11
+    cmp r11, r9
+    jae .Done
+    mov cl, [r11]
+.ExpFirst:
+    cmp cl, '0'
+    jb .Done
+    cmp cl, '9'
+    ja .Done
+    mov r8, r11
+.ExpDigits:
+    cmp r8, r9
+    jae .Done
+    mov cl, [r8]
+    cmp cl, '0'
     jb .Done
     cmp cl, '9'
     ja .Done
     inc r8
-    jmp .Fraction
+    jmp .ExpDigits
+.SignedExp:
+    mov cl, [r8 - 1]
+    or cl, 32
+    cmp cl, 'e'
+    jne .Done
+    mov cl, [r8]
+    cmp cl, '+'
+    je .SignOk
+    cmp cl, '-'
+    jne .Done
+.SignOk:
+    mov cl, [r11]
+    cmp cl, '0'
+    jb .Done
+    cmp cl, '9'
+    ja .Done
+    mov r11, r10
+.AllDigits:
+    lea rax, [r8 - 1]
+    cmp r11, rax
+    jae .SignTake
+    mov cl, [r11]
+    cmp cl, '0'
+    jb .Done
+    cmp cl, '9'
+    ja .Done
+    inc r11
+    jmp .AllDigits
+.SignTake:
+    inc r8
+    jmp .ExpDigits
 .String:
     xor r11d, r11d
 .StringLoop:

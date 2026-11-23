@@ -1,4 +1,7 @@
 %include "macros.inc"
+extern TryStackPtr
+extern GilDrop
+extern GilYield
 
 global PrimLit
 global PrimFloorDiv
@@ -6,6 +9,9 @@ global PrimPow
 global PrimLocalGet
 global PrimLocalSet
 global PrimEnter
+extern DataLimit
+extern ReturnLimit
+global PrimEnterArgs
 global PrimReturn
 global PrimNoReturn
 global PrimSayBool
@@ -276,27 +282,34 @@ PrimDPow:
 .AbsOk:
     cmp rdx, 4096
     ja .Real
-    mov rax, 1
-    cvtsi2sd xmm3, rax
+    sub rsp, 16
+    fnstcw [rsp + 8]
+    mov word [rsp + 10], 0x37F
+    fldcw [rsp + 10]
+    movsd [rsp], xmm0
+    fld1
+    fld qword [rsp]
 .IntLoop:
     test rdx, rdx
     jz .IntDone
     test rdx, 1
     jz .IntSq
-    mulsd xmm3, xmm0
+    fmul st1, st0
 .IntSq:
-    mulsd xmm0, xmm0
+    fmul st0, st0
     shr rdx, 1
     jmp .IntLoop
 .IntDone:
+    fstp st0
     test rcx, rcx
-    jns .Push3
-    mov rax, 1
-    cvtsi2sd xmm0, rax
-    divsd xmm0, xmm3
-    movapd xmm3, xmm0
-.Push3:
-    movq rax, xmm3
+    jns .IntStore
+    fld1
+    fdivrp st1, st0
+.IntStore:
+    fstp qword [rsp]
+    fldcw [rsp + 8]
+    mov rax, [rsp]
+    add rsp, 16
     DPush rax
     NEXT
 .Real:
@@ -304,7 +317,10 @@ PrimDPow:
     ucomisd xmm0, xmm2
     jb .Negative
     je .Zero
-    sub rsp, 16
+    sub rsp, 24
+    fnstcw [rsp + 16]
+    mov word [rsp + 18], 0x37F
+    fldcw [rsp + 18]
     movsd [rsp], xmm1
     movsd [rsp + 8], xmm0
     fld qword [rsp]
@@ -320,8 +336,9 @@ PrimDPow:
     fscale
     fstp st1
     fstp qword [rsp]
+    fldcw [rsp + 16]
     mov rax, [rsp]
-    add rsp, 16
+    add rsp, 24
     DPush rax
     NEXT
 .Zero:
@@ -394,14 +411,25 @@ PrimBye:
     call ExitProcess
 
 PrimCall:
-    lea rcx, [rel DataStackEnd - 512]
-    cmp r15, rcx
+    cmp r15, [rel DataLimit]
     ja Overflow
+    cmp qword [rel GilDrop], 0
+    jne .Yield
+.Go:
     mov rax, [r14]
     add r14, 8
     RPush r14
+    lea rcx, [rel PrimEnterArgs]
+    cmp [rax], rcx
+    jne .Plain
+    lea r14, [rax + 8]
+    jmp PrimEnterArgs
+.Plain:
     mov r14, rax
     NEXT
+.Yield:
+    call GilYield
+    jmp .Go
 
 PrimExit:
     RPop r14
@@ -412,7 +440,7 @@ PrimTry:
     cmp rax, 256
     jae Overflow
     shl rax, 6
-    lea rcx, [rel TryStack]
+    mov rcx, [rel TryStackPtr]
     add rcx, rax
     mov rax, [r14]
     add r14, 8
@@ -441,8 +469,7 @@ PrimLastError:
     NEXT
 
 PrimCallValue:
-    lea rcx, [rel DataStackEnd - 512]
-    cmp r15, rcx
+    cmp r15, [rel DataLimit]
     ja Overflow
     mov rcx, [r14]
     add r14, 8
@@ -519,8 +546,7 @@ PrimEnter:
     RPush r13
     mov r13, rbp
     lea rdx, [rbp + rcx * 8]
-    lea rax, [rel ReturnStackEnd - 64]
-    cmp rdx, rax
+    cmp rdx, [rel ReturnLimit]
     ja Overflow
 .Clear:
     cmp rbp, rdx
@@ -529,6 +555,38 @@ PrimEnter:
     add rbp, 8
     jmp .Clear
 .Done:
+    NEXT
+
+PrimEnterArgs:
+    mov rcx, [r14]
+    add r14, 8
+    RPush r13
+    mov r13, rbp
+    lea rdx, [rbp + rcx * 8]
+    cmp rdx, [rel ReturnLimit]
+    ja Overflow
+.Clear:
+    cmp rbp, rdx
+    jae .Args
+    mov qword [rbp], 0
+    add rbp, 8
+    jmp .Clear
+.Args:
+    lea rcx, [rel PrimLocalSet]
+.ArgLoop:
+    cmp [r14], rcx
+    jne .Branch
+    mov rax, [r14 + 8]
+    DPop rdx
+    mov [r13 + rax], rdx
+    add r14, 16
+    jmp .ArgLoop
+.Branch:
+    lea rcx, [rel PrimBranch]
+    cmp [r14], rcx
+    jne .Go
+    mov r14, [r14 + 8]
+.Go:
     NEXT
 
 PrimReturn:
@@ -572,8 +630,7 @@ PrimEnterHeap:
     mov rcx, [r14]
     add r14, 8
     RPush r13
-    lea rax, [rel ReturnStackEnd - 64]
-    cmp rbp, rax
+    cmp rbp, [rel ReturnLimit]
     ja Overflow
     push rcx
     push rcx

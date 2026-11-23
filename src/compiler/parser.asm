@@ -7,6 +7,7 @@ global ExprDepth
 global UnwindLambdas
 global TypeDepth
 global OpenBlocks
+global BlockBase
 global DropFn
 global MakingConst
 global InFn
@@ -54,6 +55,8 @@ extern BeginDef
 extern EndDef
 extern CreateVar
 extern AllocSlot
+extern DataSpace
+extern DataHere
 extern Alloc
 extern PermAlloc
 extern CopyString
@@ -61,6 +64,7 @@ extern MakeText
 extern InitStack
 extern Abort
 extern FileMode
+extern ReadMoreLine
 extern PrimLit
 extern PrimAdd
 extern PrimSub
@@ -84,6 +88,12 @@ extern PrimNoReturn
 extern PrimLocalGet
 extern PrimLocalSet
 extern PrimBranch
+extern PrimLoopBack
+extern PrimNoPtrs
+extern PrimAppendG
+extern PrimAppendL
+extern PrimFlatTop
+extern PrimSpawnThread
 extern PrimBranch0
 extern PrimBye
 extern PrimBox
@@ -123,6 +133,33 @@ extern PrimConcat
 extern PrimToText
 extern PrimToNumber
 extern PrimTextEq
+extern PrimDeepEq
+extern PrimListSort
+extern PrimAndJump
+extern PrimWait
+extern PrimTextSplit
+extern PrimTextUpper
+extern PrimTextLower
+extern PrimTextTrim
+extern PrimTextReplace
+extern PrimTextStarts
+extern PrimTextEnds
+extern PrimListRemoveValue
+extern PrimMapGetOr
+extern PrimMapGetOrInt
+extern PrimMapRemove
+extern PrimMapRemoveInt
+extern PrimSpawn
+extern PrimTaskEnd
+extern PrimEnterArgs
+extern F_Lit_PrimAdd
+extern F_Lit_PrimSub
+extern F_GetG_Lit_PrimAdd
+extern F_GetG_Lit_PrimSub
+extern F_LocalGet_Lit_PrimAdd
+extern F_LocalGet_Lit_PrimSub
+extern FuseBranch
+extern CompileOp
 extern PrimTextCompare
 extern PrimAsk
 extern PrimRandom
@@ -175,6 +212,13 @@ extern LeaveInstanceSpace
 extern TypeTable
 global KindWord
 global RecordWord
+global SettingWord
+global SpawnWhenWord
+global SpawnEveryWord
+global SpawnAfterWord
+global SpawnTaskWord
+global SpawnThreadWord
+global WaitWord
 global InterfaceWord
 global TypeWord
 global DllWord
@@ -403,7 +447,7 @@ __SECT__
     lea rcx, [rel %4]
 %%Emit:
     mov [rel ExprType], rax
-    call Compile
+    call CompileOp
 %%Over:
 %endmacro
 
@@ -485,6 +529,7 @@ PrevTokPtr   resq 1
 ExprType     resq 1
 LastVarRef   resq 1
 OpenBlocks   resq 1
+BlockBase    resq 1
 InFn         resq 1
 FnSig        resq 1
 FnFrameSlot  resq 1
@@ -522,6 +567,7 @@ NarrowCandType resq 1
 NarrowCandHere resq 1
 OrSeen resq 1
 NilCmpVar resq 1
+EqType resq 1
 CheckVars resq 64
 NilCmpType resq 1
 ScopeCount resq 1
@@ -558,6 +604,15 @@ InitVarCount resq 1
 InitVars resq 4096
 NestDepth resq 1
 NestInInstance resq 1
+FileZeroTab resb 256
+LastFnValSig resq 1
+LastFnValHere resq 1
+VarSigCount resq 1
+VarSigTab resq 3 * 1024
+ImplicitScanned resq 1
+ImplicitUsed resq 1
+ImplicitNext resq 1
+InParams resq 1
 NestPending resq 1
 FnIdCounter resq 1
 NestEntryTab resq MaxNest
@@ -599,6 +654,7 @@ section .text
 %include "parser/text.inc"
 %include "parser/assign.inc"
 %include "parser/blocks.inc"
+%include "parser/tasks.inc"
 %include "parser/tuples.inc"
 %include "parser/kinds.inc"
 %include "parser/checks.inc"

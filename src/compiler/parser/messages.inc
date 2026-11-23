@@ -109,8 +109,12 @@ Msg ErrGenericDeep, "too many type-letter functions inside each other"
 Msg ErrGenericPrompt, "functions with type letters (like T) only work in .tom files for now, not at the prompt"
 Msg ErrGenericEnd, "this function is missing its end"
 Msg ErrStructEq,   "a struct looks like: struct Color = r: byte, g: byte, b: byte, a: byte"
-Msg ErrStructType, "struct fields use byte, short, int, uint, number, float, decimal, bool or another struct"
+Msg ErrStructType, "struct fields use byte, char, short, int, uint, number, float, decimal, bool or another struct, with [size] for a fixed array"
+Msg ErrTypeUsed, "a function above uses this variable, so set can't change its type here (use a new name for the new value)"
+Msg ErrStructCount, "a fixed array size goes in brackets: a whole number from 1 to 65536, like char[32]"
 Msg ErrBadSpec,    "unknown format, try something like {x:commas} or {x:2 places}"
+Msg ErrSetting, 'settings are: setting lists start at 0 (or 1), and setting end word = "done" (any keyword can get your own word)'
+Msg ErrSortType, "sort() works on lists of numbers, decimals or text (use the sort library to sort records)"
 Msg ErrMapColon,   "dictionary items need a : between key and value"
 Msg ErrBraceClose, "missing }"
 Msg ErrRecordColon, "record fields need a : after the name"
@@ -125,3 +129,8 @@ EnumTop dq EnumNames
 align 8
 times SigCells dq 0
 BrokenBody dq PrimEnter, 0, PrimLit, 0, PrimReturn
+
+section .data
+WarnSetAgain db "this variable already exists, so this set just changes it (leave out set, or use a new name if you meant a different variable):"
+WarnSetAgainLen equ $ - WarnSetAgain
+section .text

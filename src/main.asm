@@ -1,8 +1,11 @@
 %include "macros.inc"
+extern TryStackPtr
+global ReplRsp
 
 global Start
 global Abort
 global FileMode
+global ReadMoreLine
 global Warn
 global UseWord
 global RecordLine
@@ -19,6 +22,7 @@ global FileCount
 global TryForward
 global TryForwardVar
 
+extern CompileOp
 extern InitIO
 extern PrintString
 extern PrintNumber
@@ -28,6 +32,10 @@ extern InitStack
 extern ReadLine
 extern InputBuf
 extern LoadFileArg
+extern TransformSource
+extern BlockBase
+extern PrimTasksFinish
+extern CurRetBase
 extern SetInput
 extern GetInput
 extern NextToken
@@ -136,11 +144,13 @@ ErrUseName     db "use needs a file name in quotes, like: use ", 34, "helpers.to
 ErrUseNameLen  equ $ - ErrUseName
 ErrUseFind     db "can't find that file (looked next to this file and in TomLang's lib folder):"
 ErrUseFindLen  equ $ - ErrUseFind
-ErrUseDeep     db "too many files used inside each other (16 at most) or too many files (64 at most)"
+ErrUseDeep     db "too many files used inside each other (16 at most) or too many files (256 at most)"
 ErrUseDeepLen  equ $ - ErrUseDeep
 TomExt         db ".tom"
 ErrAlias       db "use ... as needs a name after as, like: use ", 34, "text", 34, " as text"
 ErrAliasLen    equ $ - ErrAlias
+ErrUseNeedAs   db "that file name can't be a name in code, so give it one: use ", 34, "my-file.tom", 34, " as myFile (or use all of ", 34, "my-file.tom", 34, ")"
+ErrUseNeedAsLen equ $ - ErrUseNeedAs
 LibDir         db "lib/"
 UpLibDir       db "../lib/"
 
@@ -164,6 +174,7 @@ BareUse     resq 1
 AllOfUse    resq 1
 OpsScanned  resb 256
 BarePtr     resq 1
+StemBad     resq 1
 BareLen     resq 1
 FileCount   resq 1
 FilePath    resq 2 * 256
@@ -192,6 +203,9 @@ StmtBlocks  resq 1
 StmtWord    resq 1
 DeadCode    resq 1
 BlockPos    resq 4096
+ReplTop     resq 1
+StmtBlocksAbs resq 1
+ReplHist    resb 16000016
 BlockLen    resq 4096
 
 section .text
@@ -206,6 +220,9 @@ Start:
     call LoadFileArg
     test rdx, rdx
     jz Repl
+    mov rcx, rax
+    mov r8d, 1
+    call TransformSource
     mov qword [rel FileMode], 1
     push rax
     push rdx
@@ -246,6 +263,8 @@ Tokens:
     mov [rel StmtR15], r15
     mov rax, [rel OpenBlocks]
     mov [rel StmtBlocks], rax
+    add rax, [rel BlockBase]
+    mov [rel StmtBlocksAbs], rax
     mov rcx, r12
     mov rdx, r13
     call FindWord
@@ -308,6 +327,7 @@ Tokens:
     jmp Tokens
 .NoEnd:
     mov rax, [rel OpenBlocks]
+    add rax, [rel BlockBase]
     dec rax
     cmp rax, 4096
     jae .NoPos
@@ -333,6 +353,10 @@ Tokens:
     mov qword [rel Running], 1
     lea rbp, [rel ReturnStack]
     mov r13, rbp
+    cmp qword [rel FileMode], 0
+    je .NoFinish
+    CompilePrim PrimTasksFinish
+.NoFinish:
     CompilePrim LineDone
     cmp qword [rel FileMode], 0
     je .NoInits
@@ -402,7 +426,7 @@ RuntimeLine:
     jae .Done
     mov r9, [r8]
     cmp r9, r14
-    ja .Next
+    jae .Next
     cmp r9, rdx
     jb .Next
     mov rdx, r9
@@ -426,7 +450,7 @@ PrintCallers:
     mov [rsp], rax
 .Walk:
     sub r12, 8
-    lea rax, [rel ReturnStack]
+    mov rax, [rel CurRetBase]
     cmp r12, rax
     jb .Done
     cmp r13, 6
@@ -488,7 +512,7 @@ Caught:
     dec qword [rel TryDepth]
     mov rax, [rel TryDepth]
     shl rax, 6
-    lea rcx, [rel TryStack]
+    mov rcx, [rel TryStackPtr]
     add rcx, rax
     mov r14, [rcx]
     mov r15, [rcx + 8]
@@ -562,6 +586,7 @@ UseWord:
     jne .Where
     call Advance
     mov qword [rel BareUse], 0
+    mov qword [rel StemBad], 0
     mov qword [rel AllOfUse], 0
     mov rcx, [rel TokPtr]
     mov rdx, [rel TokLen]
@@ -607,6 +632,7 @@ UseWord:
     ja .BadName
     inc rcx
     sub rdx, 2
+    call QuotedStem
 .Named:
     mov [rel ErrTokPtr], rcx
     mov [rel ErrTokLen], rdx
@@ -618,12 +644,16 @@ UseWord:
     push rdx
     call NormalizePath
     call ReadAlias
-    cmp qword [rel BareUse], 0
-    je .AliasDone
     cmp qword [rel AliasLen], 0
     jne .AliasDone
     cmp qword [rel AllOfUse], 0
     jne .AliasDone
+    cmp qword [rel BareUse], 0
+    jne .MakeAlias
+    cmp qword [rel StemBad], 0
+    jne .NeedAs
+    jmp .AliasDone
+.MakeAlias:
     call BareAlias
 .AliasDone:
     call AlreadyUsed
@@ -686,7 +716,10 @@ UseWord:
 .Skip:
     add rsp, 16
     cmp qword [rel AliasLen], 0
+    jne .SkipAlias
+    cmp qword [rel AllOfUse], 0
     je .SkipDone
+.SkipAlias:
     cmp r10, 256
     jae .SkipDone
     lea rcx, [rel FileAliasLen]
@@ -709,6 +742,10 @@ UseWord:
 .Deep:
     lea rcx, [rel ErrUseDeep]
     mov edx, ErrUseDeepLen
+    jmp Abort
+.NeedAs:
+    lea rcx, [rel ErrUseNeedAs]
+    mov edx, ErrUseNeedAsLen
     jmp Abort
 
 TryForwardVar:
@@ -1199,6 +1236,71 @@ ReadAlias:
     mov edx, ErrAliasLen
     jmp Abort
 
+QuotedStem:
+    push rcx
+    push rdx
+    lea r8, [rcx + rdx]
+    mov r9, rcx
+    mov r10, rcx
+.Slash:
+    cmp r10, r8
+    jae .Base
+    mov al, [r10]
+    inc r10
+    cmp al, '/'
+    je .Cut
+    cmp al, 92
+    jne .Slash
+.Cut:
+    mov r9, r10
+    jmp .Slash
+.Base:
+    mov r10, r8
+    sub r10, r9
+    cmp r10, 4
+    jbe .Check
+    cmp dword [r8 - 4], '.tom'
+    jne .Check
+    sub r10, 4
+.Check:
+    test r10, r10
+    jz .Bad
+    movzx eax, byte [r9]
+    or al, 32
+    cmp al, 'a'
+    jb .Bad
+    cmp al, 'z'
+    ja .Bad
+    xor ecx, ecx
+.Chars:
+    cmp rcx, r10
+    jae .Good
+    movzx eax, byte [r9 + rcx]
+    inc rcx
+    cmp al, '_'
+    je .Chars
+    cmp al, '0'
+    jb .Bad
+    cmp al, '9'
+    jbe .Chars
+    or al, 32
+    cmp al, 'a'
+    jb .Bad
+    cmp al, 'z'
+    jbe .Chars
+.Bad:
+    mov qword [rel StemBad], 1
+    jmp .Done
+.Good:
+    mov qword [rel StemBad], 0
+    mov qword [rel BareUse], 1
+    mov [rel BarePtr], r9
+    mov [rel BareLen], r10
+.Done:
+    pop rdx
+    pop rcx
+    ret
+
 BareAlias:
     push rsi
     push rdi
@@ -1486,6 +1588,14 @@ ResolveUse:
     sub rsp, 8
     call LoadFile
     add rsp, 8
+    test rdx, rdx
+    jz .TryDone
+    mov rcx, rax
+    xor r8d, r8d
+    sub rsp, 8
+    call TransformSource
+    add rsp, 8
+.TryDone:
     ret
 
 SaveMain:
@@ -1594,7 +1704,8 @@ AfterBlockWord:
     cmp rax, rcx
     je .Ended
     mov rax, [rel OpenBlocks]
-    cmp rax, [rel StmtBlocks]
+    add rax, [rel BlockBase]
+    cmp rax, [rel StmtBlocksAbs]
     jbe .Done
     dec rax
     cmp rax, 4096
@@ -1611,6 +1722,7 @@ AfterBlockWord:
     ret
 .Ended:
     mov rax, [rel OpenBlocks]
+    add rax, [rel BlockBase]
     cmp rax, 4096
     jae .Done
     lea rdx, [rel BlockPos]
@@ -1626,6 +1738,7 @@ AfterBlockWord:
     je .Done
     mov r8, rcx
     mov rax, [rel OpenBlocks]
+    add rax, [rel BlockBase]
     lea rdx, [rel BlockLen]
     mov r9, [rdx + rax * 8]
     lea rcx, [rel WarnIndent]
@@ -1830,12 +1943,42 @@ Recover:
     jmp Tokens
 
 StartLine:
-    lea rcx, [rel InputBuf]
-    mov [rel SourceStart], rcx
-    lea rdx, [rcx + rax]
-    mov [rel SourceEnd], rdx
-    mov rdx, rax
+    push rsi
+    push rdi
+    mov rcx, rax
+    mov rdx, [rel ReplTop]
+    lea r8, [rdx + rcx + 2]
+    cmp r8, 16000000
+    jb .Room
+    xor edx, edx
+    mov qword [rel ReplTop], 0
+.Room:
+    lea rdi, [rel ReplHist]
+    add rdi, rdx
+    push rdi
+    lea rsi, [rel InputBuf]
+    cld
+    rep movsb
+    mov byte [rdi], 10
+    pop rcx
+    mov rdx, rdi
+    sub rdx, rcx
+    lea r8, [rdx + 1]
+    add [rel ReplTop], r8
+    lea r8, [rel ReplHist]
+    mov [rel SourceStart], r8
+    lea r8, [rcx + rdx]
+    mov [rel SourceEnd], r8
+    pop rdi
+    pop rsi
     jmp SetInput
+
+ReadMoreLine:
+    lea rcx, [rel More]
+    mov rdx, MoreLen
+    call PrintString
+    call ReadLine
+    jmp StartLine
 
 LineDone:
     cmp qword [rel FileMode], 0

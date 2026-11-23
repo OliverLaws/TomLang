@@ -68,7 +68,14 @@ FuseIncrement:
     jne .No
     lea rcx, [rel PrimLit]
     cmp [r9 + 16], rcx
+    je .LitOk
+    lea rcx, [rel F_Lit_PrimAdd]
+    cmp [r9 + 16], rcx
+    je .LitOk
+    lea rcx, [rel F_Lit_PrimSub]
+    cmp [r9 + 16], rcx
     jne .No
+.LitOk:
     mov rdx, [r9 + 32]
     lea rcx, [rel PrimAdd]
     cmp rdx, rcx
@@ -86,9 +93,22 @@ FuseIncrement:
     lea rcx, [rel PrimGetG]
     cmp rdx, rcx
     je .Global
+    lea rcx, [rel F_GetG_Lit_PrimAdd]
+    cmp rdx, rcx
+    je .Global
+    lea rcx, [rel F_GetG_Lit_PrimSub]
+    cmp rdx, rcx
+    je .Global
+    lea rcx, [rel F_LocalGet_Lit_PrimAdd]
+    cmp rdx, rcx
+    je .LocalInc
+    lea rcx, [rel F_LocalGet_Lit_PrimSub]
+    cmp rdx, rcx
+    je .LocalInc
     lea rcx, [rel PrimLocalGet]
     cmp rdx, rcx
     jne .No
+.LocalInc:
     lea rcx, [rel PrimIncL]
     jmp .Write
 .Global:
@@ -429,6 +449,13 @@ AssignTail:
     CompilePrim PrimMakeMap
     jmp .Store
 .Assign:
+    mov rcx, [rsp]
+    call TryAppendAssign
+    test eax, eax
+    jz .NotAppend
+    pop rcx
+    jmp Pushback
+.NotAppend:
     mov rax, [rel ReplaceType]
     test rax, rax
     jnz .AssignHint
@@ -496,7 +523,10 @@ AssignTail:
     test rax, rax
     jz .Replace
     cmp rax, rcx
-    je .Store
+    jne .NotSame
+    call WarnReset
+    jmp .Store
+.NotSame:
     mov rdx, rax
     mov rcx, [rsp]
     call SetTypeOf
@@ -507,6 +537,10 @@ AssignTail:
     mov rax, [rel ExprType]
     mov [rel ReplaceType], rax
 .Fresh:
+    mov rcx, [rsp]
+    call UsedByFunction
+    test eax, eax
+    jnz .UsedElsewhere
     mov rcx, [rel CurReplacePtr]
     mov rdx, [rel CurReplaceLen]
     call NewVar
@@ -515,6 +549,8 @@ AssignTail:
     mov rdx, [rel ReplaceType]
     call SetTypeOf
     jmp .Store
+.UsedElsewhere:
+    Fail ErrTypeUsed
 .AddAssign:
     mov rcx, [rsp]
     call TypeOf
@@ -589,6 +625,19 @@ AssignTail:
     Fail ErrChangeType
 .Append:
     mov rcx, [rsp]
+    call CanAppend
+    test eax, eax
+    jz .SlowAppend
+    call Advance
+    call ParseExpr
+    mov rax, [rel ExprType]
+    call ToTextRaw
+    mov rcx, [rsp]
+    call EmitAppend
+    pop rcx
+    jmp Pushback
+.SlowAppend:
+    mov rcx, [rsp]
     call EmitLoad
     call Advance
     call ParseExpr
@@ -596,6 +645,19 @@ AssignTail:
     call ToTextRaw
     CompilePrim PrimConcat
 .Store:
+    mov rcx, [rsp]
+    call MarkNumberList
+    pop rcx
+    push rcx
+    push rcx
+    xor edx, edx
+    mov rax, [rel LastFnValHere]
+    cmp rax, [rel Here]
+    jne .NoSig
+    mov rdx, [rel LastFnValSig]
+.NoSig:
+    call RecordVarSig
+    pop rcx
     pop rcx
     call EmitStore
     jmp Pushback
@@ -650,6 +712,11 @@ AssignTail:
     mov rax, [rel PathKey]
     cmp [rel ExprType], rax
     jne TypeError
+    lea rax, [rel PrimIndex]
+    cmp [rel PathGet], rax
+    jne .PathKeyDone
+    call EmitIndexFix
+.PathKeyDone:
     Expect "]", ErrBracket
     call Advance
     mov rcx, [rel PathType]
@@ -822,3 +889,376 @@ PathFinalOp:
     mov qword [rel PathOp], 3
     mov eax, 1
     ret
+
+CanAppend:
+    xor eax, eax
+    test rcx, 4
+    jnz .No
+    test rcx, 2
+    jnz .Local
+    lea r8, [rel DataSpace]
+    cmp rcx, r8
+    jb .No
+    cmp rcx, [rel DataHere]
+    jae .No
+    cmp qword [rcx - 8], TText
+    jne .No
+    mov eax, 1
+.No:
+    ret
+.Local:
+    mov r8, rcx
+    shr r8, 3
+    lea r9, [rel LocalType]
+    cmp qword [r9 + r8 * 8], TText
+    jne .No
+    mov eax, 1
+    ret
+
+EmitAppend:
+    push rcx
+    push rcx
+    test rcx, 2
+    jnz .Local
+    call MarkGlobalUse
+    CompilePrim PrimAppendG
+    pop rcx
+    pop rcx
+    jmp Compile
+.Local:
+    CompilePrim PrimAppendL
+    pop rcx
+    pop rcx
+    and rcx, -8
+    jmp Compile
+
+[section .data]
+PlusText db "+"
+__SECT__
+
+TryAppendAssign:
+    sub rsp, 40
+    mov [rsp + 8], rcx
+    xor eax, eax
+    cmp qword [rel CurReplaceLen], 0
+    jne .Out
+    cmp qword [rel ReplaceType], 0
+    jne .Out
+    call CanAppend
+    test eax, eax
+    jz .Out
+    call Advance
+    mov rax, [rel TokPtr]
+    mov [rsp + 16], rax
+    mov rcx, rax
+    mov rdx, [rel TokLen]
+    test rdx, rdx
+    jz .Restore
+    call LookupVar
+    cmp rax, [rsp + 8]
+    jne .Restore
+    mov rax, [rel TokPtr]
+    add rax, [rel TokLen]
+    movzx eax, byte [rax]
+    cmp al, '.'
+    je .Restore
+    cmp al, '['
+    je .Restore
+    cmp al, '('
+    je .Restore
+    call Advance
+    IfTok "+", .Plus
+    jmp .Restore
+.Plus:
+    call Advance
+    mov rax, [rel TokPtr]
+    mov [rsp + 24], rax
+    mov qword [rsp], 0
+.Scan:
+    cmp qword [rel TokLen], 0
+    je .ScanEnd
+    mov rax, [rel TokPtr]
+    cmp rax, [rsp + 24]
+    je .First
+    cmp qword [rsp], 0
+    jne .Depth
+    call SameLine
+    test eax, eax
+    jz .ScanEnd
+.First:
+    cmp qword [rsp], 0
+    jne .Depth
+    IfTok "+", .Restore
+    IfTok "-", .Restore
+    IfTok "==", .Restore
+    IfTok "!=", .Restore
+    IfTok "<", .Restore
+    IfTok ">", .Restore
+    IfTok "<=", .Restore
+    IfTok ">=", .Restore
+    IfTok "and", .Restore
+    IfTok "or", .Restore
+    IfTok "xor", .Restore
+    IfTok "if", .Restore
+    IfTok "otherwise", .Restore
+    IfTok "is", .Restore
+    IfTok "in", .Restore
+    IfTok "..", .Restore
+    IfTok "|>", .Restore
+    IfTok "&", .Restore
+    IfTok "|", .Restore
+    IfTok "<<", .Restore
+    IfTok ">>", .Restore
+    IfTok "not", .Restore
+    IfTok "for", .Restore
+.Depth:
+    IfTok "(", .Open
+    IfTok "[", .Open
+    IfTok "{", .Open
+    IfTok ")", .Close
+    IfTok "]", .Close
+    IfTok "}", .Close
+    jmp .ScanNext
+.Open:
+    inc qword [rsp]
+    jmp .ScanNext
+.Close:
+    dec qword [rsp]
+.ScanNext:
+    call Advance
+    jmp .Scan
+.ScanEnd:
+    mov rcx, [rsp + 24]
+    call Unread
+    call Advance
+    call ParseProduct
+    mov rax, [rel ExprType]
+    cmp rax, TDec
+    ja .Stack
+    call ToTextRaw
+    mov rcx, [rsp + 8]
+    call EmitAppend
+    mov eax, 1
+    jmp .Out
+.Stack:
+    mov [rsp + 32], rax
+    mov rcx, [rsp + 8]
+    call EmitLoad
+    CompilePrim PrimSwap
+    mov rax, [rsp + 32]
+    mov [rel ExprType], rax
+    mov eax, TText
+    mov rdx, [rel ExprType]
+    lea rcx, [rel PlusText]
+    mov r8d, 1
+    call TryOverload
+    test eax, eax
+    jnz .Overloaded
+    mov rax, [rel ExprType]
+    call ToTextRaw
+    CompilePrim PrimConcat
+    mov qword [rel ExprType], TText
+.Overloaded:
+    cmp qword [rel ExprType], TText
+    jne TypeError
+    mov rcx, [rsp + 8]
+    call EmitStore
+    mov eax, 1
+    jmp .Out
+.Restore:
+    mov rcx, [rsp + 16]
+    call Unread
+    xor eax, eax
+.Out:
+    add rsp, 40
+    ret
+
+MarkNumberList:
+    call TypeOf
+    test rax, rax
+    jz .No
+    push rax
+    push rax
+    mov rcx, rax
+    call TypeKind
+    pop rcx
+    pop rcx
+    cmp rax, KList
+    jne .No
+    call ElemOf
+    cmp rax, TNum
+    je .Yes
+    cmp rax, TDec
+    je .Yes
+    cmp rax, TBool
+    je .Yes
+    test rax, rax
+    jz .No
+    mov rcx, rax
+    call TypeKind
+    cmp rax, KEnum
+    jne .No
+.Yes:
+    CompilePrim PrimNoPtrs
+.No:
+    ret
+
+UsedByFunction:
+    xor eax, eax
+    cmp qword [rel CurReplaceLen], 0
+    je .Done
+    test rcx, 6
+    jnz .Done
+    lea r8, [rel DataSpace]
+    cmp rcx, r8
+    jb .Done
+    cmp rcx, [rel DataHere]
+    jae .Done
+    mov rax, [rcx - 16]
+.Done:
+    ret
+
+WarnReset:
+    cmp qword [rel CurReplaceLen], 0
+    je .Done
+    mov rax, [rel OpenBlocks]
+    cmp qword [rel InFn], 0
+    je .Level
+    dec rax
+.Level:
+    test rax, rax
+    jnz .Done
+    push rcx
+    lea rcx, [rel WarnSetAgain]
+    mov edx, WarnSetAgainLen
+    mov r8, [rel CurReplacePtr]
+    mov r9, [rel CurReplaceLen]
+    call Warn
+    pop rcx
+.Done:
+    ret
+
+VarSigKey:
+    xor eax, eax
+    test rcx, 6
+    jz .Global
+    mov rax, [rel CurFnId]
+    inc rax
+.Global:
+    ret
+
+RecordVarSig:
+    push rbx
+    call VarSigKey
+    lea r8, [rel VarSigTab]
+    xor ebx, ebx
+.Find:
+    cmp rbx, [rel VarSigCount]
+    jae .New
+    mov r9, rbx
+    imul r9, r9, 24
+    cmp [r8 + r9], rax
+    jne .Next
+    cmp [r8 + r9 + 8], rcx
+    jne .Next
+    mov [r8 + r9 + 16], rdx
+    jmp .Done
+.Next:
+    inc rbx
+    jmp .Find
+.New:
+    test rdx, rdx
+    jz .Done
+    cmp rbx, 1024
+    jae .Done
+    imul r9, rbx, 24
+    mov [r8 + r9], rax
+    mov [r8 + r9 + 8], rcx
+    mov [r8 + r9 + 16], rdx
+    inc qword [rel VarSigCount]
+.Done:
+    pop rbx
+    ret
+
+FindVarSig:
+    push rbx
+    call VarSigKey
+    lea r8, [rel VarSigTab]
+    xor ebx, ebx
+.Find:
+    cmp rbx, [rel VarSigCount]
+    jae .None
+    imul r9, rbx, 24
+    cmp [r8 + r9], rax
+    jne .Next
+    cmp [r8 + r9 + 8], rcx
+    jne .Next
+    mov rax, [r8 + r9 + 16]
+    pop rbx
+    ret
+.Next:
+    inc rbx
+    jmp .Find
+.None:
+    xor eax, eax
+    pop rbx
+    ret
+
+FileZero:
+    mov rax, [rel CurFile]
+    cmp rax, 256
+    jae .No
+    lea rcx, [rel FileZeroTab]
+    cmp byte [rcx + rax], 0
+    ret
+.No:
+    cmp eax, eax
+    ret
+
+EmitIndexFix:
+    call FileZero
+    jz .Done
+    CompileNum 1
+    CompilePrim PrimAdd
+.Done:
+    ret
+
+EmitSliceFix:
+    call FileZero
+    jz .Done
+    CompileNum 1
+    CompilePrim PrimAdd
+    CompilePrim PrimSwap
+    CompileNum 1
+    CompilePrim PrimAdd
+    CompilePrim PrimSwap
+.Done:
+    ret
+
+SettingWord:
+    call Advance
+    IfTok "lists", .Lists
+    Fail ErrSetting
+.Lists:
+    call Advance
+    Expect "start", ErrSetting
+    call Advance
+    Expect "at", ErrSetting
+    call Advance
+    IfTok "0", .Zero
+    IfTok "1", .One
+    Fail ErrSetting
+.Zero:
+    mov al, 1
+    jmp .Store
+.One:
+    xor eax, eax
+.Store:
+    mov rcx, [rel CurFile]
+    cmp rcx, 256
+    jae .Done
+    lea rdx, [rel FileZeroTab]
+    mov [rdx + rcx], al
+.Done:
+    call Advance
+    jmp Pushback

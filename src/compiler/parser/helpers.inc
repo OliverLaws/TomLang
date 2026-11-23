@@ -139,6 +139,11 @@ LaterResult:
     Fail ErrLaterResult
 
 EmitJump:
+    lea rax, [rel PrimBranch0]
+    cmp rcx, rax
+    jne .Emit
+    call FuseBranch
+.Emit:
     call Compile
     mov r10, [rel Here]
     xor ecx, ecx
@@ -298,6 +303,12 @@ ParseTypeNameInner:
     ret
 .List:
     call OfType
+    test rax, rax
+    jnz .ListTyped
+    cmp qword [rel InParams], 0
+    je .ListTyped
+    call ImplicitParamType
+.ListTyped:
     mov rcx, rax
     jmp ListOf
 .Map:
@@ -855,6 +866,18 @@ EmitGlobalInits:
     pop rbx
     ret
 
+MarkGlobalUse:
+    cmp qword [rel InFn], 0
+    je .Done
+    lea rax, [rel DataSpace]
+    cmp rcx, rax
+    jb .Done
+    cmp rcx, [rel DataHere]
+    jae .Done
+    mov qword [rcx - 16], 1
+.Done:
+    ret
+
 NewHidden:
     cmp qword [rel InFn], 0
     je AllocSlot
@@ -911,6 +934,19 @@ SetTypeOf:
     ret
 
 EmitLoad:
+    push rcx
+    push rcx
+    call EmitLoadTyped
+    pop rcx
+    pop rcx
+    call TypeOf
+    cmp rax, TText
+    jne .Done
+    CompilePrim PrimFlatTop
+.Done:
+    ret
+
+EmitLoadTyped:
     call NarrowOf
     test rax, rax
     jnz EmitNarrowLoad
@@ -920,6 +956,7 @@ EmitLoadRaw:
     jnz .Local
     test rcx, 4
     jnz .Outer
+    call MarkGlobalUse
     CompilePrim PrimGetG
     pop rcx
     jmp Compile
@@ -942,6 +979,7 @@ EmitStoreRaw:
     jnz .Local
     test rcx, 4
     jnz .Outer
+    call MarkGlobalUse
     CompilePrim PrimSetG
     pop rcx
     jmp Compile

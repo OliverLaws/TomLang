@@ -1,0 +1,33 @@
+do send(channel: list of T, value: T)
+    channel.add(value)
+end
+
+do receive(channel: list of T): T
+    repeat while channel.length == 0
+        wait 0.001
+    end
+    return channel.removeAt(1)
+end
+
+do receiveFor(channel: list of T, seconds: decimal): T?
+    set left = seconds
+    repeat while channel.length == 0
+        if left <= 0
+            return nothing
+        end
+        wait 0.001
+        left -= 0.001
+    end
+    return channel.removeAt(1)
+end
+
+do tryReceive(channel: list of T): T?
+    if channel.length == 0
+        return nothing
+    end
+    return channel.removeAt(1)
+end
+
+do waiting(channel: list of T): number
+    return channel.length
+end

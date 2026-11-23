@@ -1,7 +1,12 @@
 %include "macros.inc"
 
+global MemCopy
 global PrimSayText
 extern Alloc
+extern AllocAtomic
+extern AllocLike
+extern ParkIfThreaded
+extern UnparkIf
 extern MakeTextFrom
 extern Utf8Offset
 global PrimConcat
@@ -45,15 +50,58 @@ TmpBuf    resb 24
 
 section .text
 MemCopy:
+    cmp r8, 32
+    ja .Big
+    push r10
+    push r11
     xor r9d, r9d
-.Loop:
-    cmp r9, r8
-    jae .Done
+.Quad:
+    lea r11, [r9 + 8]
+    cmp r11, r8
+    ja .Byte
+    mov r10, [rcx + r9]
+    mov [rdx + r9], r10
+    add r9, 8
+    jmp .Quad
+.Byte:
+    mov r11, r8
+    sub r11, r9
+    jz .Small
+    cmp r11, 4
+    jb .Two
+    mov r10d, [rcx + r9]
+    mov [rdx + r9], r10d
+    mov r10d, [rcx + r8 - 4]
+    mov [rdx + r8 - 4], r10d
+    jmp .Small
+.Two:
+    cmp r11, 2
+    jb .One
+    mov r10w, [rcx + r9]
+    mov [rdx + r9], r10w
+    mov r10w, [rcx + r8 - 2]
+    mov [rdx + r8 - 2], r10w
+    jmp .Small
+.One:
     mov r10b, [rcx + r9]
     mov [rdx + r9], r10b
-    inc r9
-    jmp .Loop
-.Done:
+.Small:
+    pop r11
+    pop r10
+    mov r9, r8
+    xor ecx, ecx
+    ret
+.Big:
+    push rsi
+    push rdi
+    mov rsi, rcx
+    mov rdi, rdx
+    mov rcx, r8
+    cld
+    rep movsb
+    mov r9, r8
+    pop rdi
+    pop rsi
     ret
 
 PrimSayText:
@@ -70,7 +118,7 @@ PrimConcat:
     mov rcx, [rsi]
     add rcx, [rdi]
     add rcx, 8
-    call Alloc
+    call AllocAtomic
     mov rbx, rax
     mov rdx, [rsi]
     add rdx, [rdi]
@@ -112,7 +160,7 @@ PrimToText:
 .Make:
     sub rdi, rsi
     lea rcx, [rdi + 8]
-    call Alloc
+    call AllocAtomic
     mov rbx, rax
     mov [rbx], rdi
     mov rcx, rsi
@@ -244,10 +292,20 @@ PrimAsk:
     mov rdx, [rax]
     call PrintString
 .Read:
+    call ParkIfThreaded
+    push rax
+    push rax
     call ReadLine
+    pop rcx
+    pop rcx
+    push rax
+    push rax
+    call UnparkIf
+    pop rax
+    pop rax
     mov rdi, rax
     lea rcx, [rax + 8]
-    call Alloc
+    call AllocAtomic
     mov rbx, rax
     mov [rbx], rdi
     lea rcx, [rel InputBuf]
@@ -353,7 +411,8 @@ PrimListAdd:
     jb .Room
     mov rcx, [rdi + 8]
     shl rcx, 4
-    call Alloc
+    mov rdx, [rdi + 16]
+    call AllocLike
     mov rbx, rax
     mov rcx, [rdi + 16]
     mov rdx, rbx
@@ -384,7 +443,8 @@ PrimListCopy:
 .Cap:
     mov [rax + 8], rcx
     shl rcx, 3
-    call Alloc
+    mov rdx, [rdx + 16]
+    call AllocLike
     pop rdi
     pop rdi
     mov [rdi + 16], rax
@@ -455,7 +515,8 @@ PrimListInsert:
     jb .Room
     mov rcx, [rdi + 8]
     shl rcx, 4
-    call Alloc
+    mov rdx, [rdi + 16]
+    call AllocLike
     push rax
     push rax
     mov rcx, [rdi + 16]
@@ -509,7 +570,9 @@ PrimListSlice:
 .Cap:
     mov [rax + 8], rcx
     shl rcx, 3
-    call Alloc
+    mov rdx, [r15 - 8]
+    mov rdx, [rdx + 16]
+    call AllocLike
     pop rdx
     pop rdx
     mov [rdx + 16], rax
@@ -592,7 +655,7 @@ PrimJoin:
     push rax
     push rax
     lea rcx, [rax + 8]
-    call Alloc
+    call AllocAtomic
     mov rbx, rax
     pop rax
     pop rax

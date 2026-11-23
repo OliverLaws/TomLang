@@ -2,7 +2,11 @@
 
 global InitHeap
 global Alloc
+global AllocAtomic
+global AllocLike
+global PrimNoPtrs
 extern U8Text
+extern LetterCache
 global PermAlloc
 global Collect
 global StackBase
@@ -11,6 +15,11 @@ global GcCount
 extern SysAlloc
 extern Abort
 extern DataStack
+extern CurDataBase
+extern CurRetBase
+extern TaskMarkRoots
+extern ThreadMarkRoots
+global MarkRange
 extern ReturnStack
 extern DataSpace
 extern DataHere
@@ -20,6 +29,7 @@ extern FfiArgs
 
 %define Free 2
 %define Mark 1
+%define NoPtrs 4
 %define HeapSize (1 << 30)
 %define PermSize (64 << 20)
 %define MarkMax (1 << 20)
@@ -43,6 +53,7 @@ AllocBytes  resq 1
 LiveBytes   resq 1
 StackBase   resq 1
 GcStress    resq 1
+AtomicReq   resq 1
 GcCount     resq 1
 InGc        resq 1
 FreeSmall   resq 64
@@ -110,6 +121,24 @@ PermAlloc:
     mov [rel PermHere], r8
     ret
 
+PrimNoPtrs:
+    mov rax, [r15 - 8]
+    test rax, rax
+    jz .Done
+    mov rax, [rax + 16]
+    test rax, rax
+    jz .Done
+    mov rsi, rax
+    call FindBlock
+    test rax, rax
+    jz .Done
+    lea rcx, [rax + 8]
+    cmp rcx, rsi
+    jne .Done
+    or qword [rax], NoPtrs
+.Done:
+    NEXT
+
 SetBit:
     sub r8, [rel HeapStart]
     shr r8, 4
@@ -124,7 +153,18 @@ ClearBit:
     btr [r9], r8
     ret
 
+AllocLike:
+    test rdx, rdx
+    jz Alloc
+    test qword [rdx - 8], NoPtrs
+    jz Alloc
+AllocAtomic:
+    mov qword [rel AtomicReq], 1
+    jmp AllocAny
+
 Alloc:
+    mov qword [rel AtomicReq], 0
+AllocAny:
     push rdx
     push rsi
     push rdi
@@ -171,7 +211,7 @@ Alloc:
     test rax, rax
     jz .Bump
     mov rdx, [rax]
-    and rdx, -4
+    and rdx, -16
     cmp rdx, rcx
     jae .Fit
     lea rsi, [rax + 8]
@@ -223,21 +263,39 @@ Alloc:
 .BumpOk:
     lea rdx, [rax + rcx]
     mov [rel HeapTop], rdx
-    push rax
-    push rcx
     mov r8, rax
-    call SetBit
-    pop rcx
-    pop rax
+    sub r8, [rel HeapStart]
+    shr r8, 4
+    mov r9, [rel Bitmap]
+    bts [r9], r8
 .Got:
+    cmp qword [rel AtomicReq], 0
+    jne .NoZero
     mov [rax], rcx
     lea rdi, [rax + 8]
-    push rdi
     sub rcx, 8
+    cmp rcx, 56
+    ja .BigZero
+    xor edx, edx
+.SmallZero:
+    mov qword [rdi + rdx], 0
+    add rdx, 8
+    cmp rdx, rcx
+    jb .SmallZero
+    mov rax, rdi
+    jmp .Out
+.BigZero:
+    push rdi
     shr rcx, 3
     xor eax, eax
     rep stosq
     pop rax
+    jmp .Out
+.NoZero:
+    or rcx, NoPtrs
+    mov [rax], rcx
+    add rax, 8
+.Out:
     pop r11
     pop r10
     pop r9
@@ -297,7 +355,7 @@ FindBlock:
     mov rdx, [r9]
     test rdx, Free
     jnz .No
-    and rdx, -4
+    and rdx, -16
     add rdx, r9
     cmp rax, rdx
     jae .No
@@ -348,7 +406,9 @@ Drain:
     mov r8, [rel MarkStack]
     mov rbx, [r8 + rax * 8]
     mov rdi, [rbx]
-    and rdi, -4
+    test rdi, NoPtrs
+    jnz .Loop
+    and rdi, -16
     add rdi, rbx
     lea rsi, [rbx + 8]
     call MarkRange
@@ -363,10 +423,12 @@ Drain:
     jae .Loop
     mov rdx, [rbx]
     mov rdi, rdx
-    and rdi, -4
+    and rdi, -16
     test rdx, Mark
     jz .Skip
     test rdx, Free
+    jnz .Skip
+    test rdx, NoPtrs
     jnz .Skip
     push rbx
     push rdi
@@ -397,16 +459,23 @@ Collect:
     push r13
     push r14
     push r15
+    mov qword [rel U8Text], 0
+    lea rdi, [rel LetterCache]
+    mov ecx, LetterCacheQ
+    xor eax, eax
+    rep stosq
     mov qword [rel InGc], 1
     inc qword [rel GcCount]
     mov qword [rel MarkTop], 0
     mov qword [rel MarkOver], 0
-    lea rsi, [rel DataStack]
+    mov rsi, [rel CurDataBase]
     mov rdi, r15
     call MarkRange
-    lea rsi, [rel ReturnStack]
+    mov rsi, [rel CurRetBase]
     mov rdi, rbp
     call MarkRange
+    call TaskMarkRoots
+    call ThreadMarkRoots
     lea rsi, [rel DataSpace]
     mov rdi, [rel DataHere]
     call MarkRange
@@ -464,7 +533,7 @@ Sweep:
     jae .End
     mov rdx, [rbx]
     mov r13, rdx
-    and r13, -4
+    and r13, -16
     test rdx, Free
     jnz .Dead
     test rdx, Mark

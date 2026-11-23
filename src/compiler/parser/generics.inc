@@ -51,6 +51,8 @@ GenericDefine:
     call SkipBody
     pop rcx
     mov [rcx + 16], rax
+    mov rdx, [rel SourceEnd]
+    mov [rcx + 32], rdx
     call EndDef
     mov qword [rel InFn], 0
     mov qword [rel LocalCount], 0
@@ -65,7 +67,12 @@ SkipBody:
 .Loop:
     call NextToken
     test rdx, rdx
-    jz .Missing
+    jnz .Have
+    cmp qword [rel FileMode], 0
+    jne .Missing
+    call ReadMoreLine
+    jmp .Loop
+.Have:
     mov [rel TokPtr], rax
     mov [rel TokLen], rdx
     IfTok "end", .End

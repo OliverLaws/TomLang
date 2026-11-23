@@ -1,4 +1,5 @@
 global InitStack
+extern InitTasks
 global DataStack
 global DataStackEnd
 global ReturnStack
@@ -14,4 +15,4 @@ ReturnStackEnd resq 4
 section .text
 InitStack:
     lea r15, [rel DataStack]
-    ret
+    jmp InitTasks

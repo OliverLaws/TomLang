@@ -1,0 +1,541 @@
+# Searching & Checking
+do indexOf(source: text, find: text, startPos: number = 1): number?
+    set sourceLen = source.length
+    set targetLen = find.length
+    set begin = 1 if startPos < 1 otherwise startPos
+
+    if targetLen == 0
+        if begin <= sourceLen + 1
+            return begin
+        end
+        return nothing
+    end
+    if not (find in source)
+        return nothing
+    end
+
+    set first = find[1]
+    set lastStart = sourceLen - targetLen + 1
+    repeat i from begin to lastStart
+        if source[i] == first and source[i .. i + targetLen - 1] == find
+            return i
+        end
+    end
+
+    return nothing
+end
+
+do lastIndexOf(source: text, find: text): number?
+    set sourceLen = source.length
+    set targetLen = find.length
+
+    if targetLen == 0
+        return sourceLen + 1
+    end
+    if not (find in source)
+        return nothing
+    end
+
+    set first = find[1]
+    set lastStart = sourceLen - targetLen + 1
+    repeat i from lastStart to 1 by -1
+        if source[i] == first and source[i .. i + targetLen - 1] == find
+            return i
+        end
+    end
+
+    return nothing
+end
+
+do contains(source: text, find: text): bool
+    return source.contains(find)
+end
+
+do startsWith(source: text, prefix: text): bool
+    return source.startsWith(prefix)
+end
+
+do endsWith(source: text, suffix: text): bool
+    return source.endsWith(suffix)
+end
+
+do count(source: text, find: text): number
+    if find.length == 0
+        return source.length + 1
+    end
+
+    set total = 0
+    set pos = 1
+    repeat forever
+        set found = indexOf(source, find, pos)
+        if found == nothing
+            stop
+        end
+        total += 1
+        pos = found + find.length
+    end
+    return total
+end
+
+do isEmpty(source: text): bool
+    return source.length == 0
+end
+
+do isSpace(character: text): bool
+    return character == " " or character == "\t" or character == "\n" or character == "\r"
+end
+
+do isBlank(source: text): bool
+    repeat each character in source
+        if not isSpace(character)
+            return false
+        end
+    end
+    return true
+end
+
+do isLetter(character: text): bool
+    set code = charCode(character)
+    return _lowerCode(code) != code or _upperCode(code) != code or code == 223
+end
+
+do isDigit(character: text): bool
+    set code = charCode(character)
+    return code >= 48 and code <= 57
+end
+
+do isLetters(source: text): bool
+    if source.length == 0
+        return false
+    end
+    repeat each character in source
+        if not isLetter(character)
+            return false
+        end
+    end
+    return true
+end
+
+do isDigits(source: text): bool
+    if source.length == 0
+        return false
+    end
+    repeat each character in source
+        if not isDigit(character)
+            return false
+        end
+    end
+    return true
+end
+
+do isLettersOrDigits(source: text): bool
+    if source.length == 0
+        return false
+    end
+    repeat each character in source
+        if not isLetter(character) and not isDigit(character)
+            return false
+        end
+    end
+    return true
+end
+
+do isUpper(source: text): bool
+    set hasLetter = false
+    repeat each character in source
+        set code = charCode(character)
+        if _upperCode(code) != code
+            return false
+        end
+        if _lowerCode(code) != code
+            hasLetter = true
+        end
+    end
+    return hasLetter
+end
+
+do isLower(source: text): bool
+    set hasLetter = false
+    repeat each character in source
+        set code = charCode(character)
+        if _lowerCode(code) != code
+            return false
+        end
+        if _upperCode(code) != code
+            hasLetter = true
+        end
+    end
+    return hasLetter
+end
+
+# Splitting & Joining
+do split(source: text, separator: text): list of text
+    return source.split(separator)
+end
+
+do splitOnce(source: text, separator: text): list of text
+    set found = indexOf(source, separator)
+    if found == nothing or separator.length == 0
+        return [source]
+    end
+    return [take(source, found - 1), drop(source, found + separator.length - 1)]
+end
+
+do rsplitOnce(source: text, separator: text): list of text
+    set found = lastIndexOf(source, separator)
+    if found == nothing or separator.length == 0
+        return [source]
+    end
+    return [take(source, found - 1), drop(source, found + separator.length - 1)]
+end
+
+do join(pieces: list of text, separator: text = ""): text
+    return pieces.join(separator)
+end
+
+do lines(source: text): list of text
+    return split(replace(source, "\r\n", "\n"), "\n")
+end
+
+do words(source: text): list of text
+    set parts: list of text = []
+    set current: list of text = []
+    repeat each character in source
+        if isSpace(character)
+            if current.length > 0
+                parts.add(current.join())
+                current = []
+            end
+        otherwise
+            current.add(character)
+        end
+    end
+    if current.length > 0
+        parts.add(current.join())
+    end
+    return parts
+end
+
+do chars(source: text): list of text
+    set out: list of text = []
+    repeat each character in source
+        out.add(character)
+    end
+    return out
+end
+
+# Trimming & Padding
+do trimStart(source: text): text
+    repeat i from 1 to source.length
+        if not isSpace(source[i])
+            return drop(source, i - 1)
+        end
+    end
+    return ""
+end
+
+do trimEnd(source: text): text
+    repeat i from source.length to 1 by -1
+        if not isSpace(source[i])
+            return take(source, i)
+        end
+    end
+    return ""
+end
+
+do trim(source: text): text
+    return source.trim()
+end
+
+do trimChars(source: text, charsToRemove: text): text
+    set first = 1
+    set last = source.length
+    repeat while first <= last and source[first] in charsToRemove
+        first += 1
+    end
+    repeat while last >= first and source[last] in charsToRemove
+        last -= 1
+    end
+    return slice(source, first, last)
+end
+
+do padStart(source: text, width: number, padWith: text = " "): text
+    if source.length >= width or padWith.length == 0
+        return source
+    end
+    return repeatText(padWith, width - source.length) + source
+end
+
+do padEnd(source: text, width: number, padWith: text = " "): text
+    if source.length >= width or padWith.length == 0
+        return source
+    end
+    return source + repeatText(padWith, width - source.length)
+end
+
+do centre(source: text, width: number, padWith: text = " "): text
+    if source.length >= width or padWith.length == 0
+        return source
+    end
+    set space = width - source.length
+    set left = space // 2
+    return repeatText(padWith, left) + source + repeatText(padWith, space - left)
+end
+
+# Transforming & Formatting
+do _lowerCode(code: number): number
+    if code < 65
+        return code
+    end
+    if code <= 90
+        return code + 32
+    end
+    if code < 192
+        return code
+    end
+    if code <= 222
+        if code == 215
+            return code
+        end
+        return code + 32
+    end
+    if code >= 256 and code <= 383
+        if code == 376
+            return 255
+        end
+        if (code >= 313 and code <= 328) or (code >= 377 and code <= 382)
+            if code % 2 == 1
+                return code + 1
+            end
+            return code
+        end
+        if code % 2 == 0 and code != 304 and code != 312
+            return code + 1
+        end
+        return code
+    end
+    if code >= 913 and code <= 939 and code != 930
+        return code + 32
+    end
+    if code >= 1040 and code <= 1071
+        return code + 32
+    end
+    if code >= 1024 and code <= 1039
+        return code + 80
+    end
+    return code
+end
+
+do _upperCode(code: number): number
+    if code < 97
+        return code
+    end
+    if code <= 122
+        return code - 32
+    end
+    if code < 224
+        return code
+    end
+    if code <= 254
+        if code == 247
+            return code
+        end
+        return code - 32
+    end
+    if code == 255
+        return 376
+    end
+    if code >= 256 and code <= 383
+        if (code >= 313 and code <= 328) or (code >= 377 and code <= 382)
+            if code % 2 == 0
+                return code - 1
+            end
+            return code
+        end
+        if code % 2 == 1 and code != 305 and code != 312 and code != 329 and code != 383
+            return code - 1
+        end
+        return code
+    end
+    if code >= 945 and code <= 971 and code != 962
+        return code - 32
+    end
+    if code >= 1072 and code <= 1103
+        return code - 32
+    end
+    if code >= 1104 and code <= 1119
+        return code - 80
+    end
+    return code
+end
+
+do upper(source: text): text
+    return source.upper()
+end
+
+do lower(source: text): text
+    return source.lower()
+end
+
+do capitalise(source: text): text
+    if source.length == 0
+        return source
+    end
+    return upper(source[1]) + lower(drop(source, 1))
+end
+
+do titleCase(source: text): text
+    set out: list of text = []
+    set startOfWord = true
+    repeat each character in source
+        if isLetter(character)
+            out.add(upper(character) if startOfWord otherwise lower(character))
+            startOfWord = false
+        otherwise
+            out.add(character)
+            startOfWord = isSpace(character)
+        end
+    end
+    return out.join()
+end
+
+do swapCase(source: text): text
+    set out: list of text = []
+    repeat each character in source
+        set code = charCode(character)
+        set lowered = _lowerCode(code)
+        if lowered != code
+            out.add(charFrom(lowered))
+        otherwise
+            out.add(charFrom(_upperCode(code)))
+        end
+    end
+    return out.join()
+end
+
+do normaliseWhitespace(source: text): text
+    return words(source).join(" ")
+end
+
+do replaceFirst(source: text, find: text, replaceWith: text): text
+    set found = indexOf(source, find)
+    if found == nothing or find.length == 0
+        return source
+    end
+    return take(source, found - 1) + replaceWith + drop(source, found + find.length - 1)
+end
+
+do replaceLast(source: text, find: text, replaceWith: text): text
+    set found = lastIndexOf(source, find)
+    if found == nothing or find.length == 0
+        return source
+    end
+    return take(source, found - 1) + replaceWith + drop(source, found + find.length - 1)
+end
+
+do replace(source: text, find: text, replaceWith: text): text
+    return source.replace(find, replaceWith)
+end
+
+do repeatText(source: text, times: number): text
+    set out: list of text = []
+    repeat times times
+        out.add(source)
+    end
+    return out.join()
+end
+
+do reverseText(source: text): text
+    set out: list of text = []
+    repeat i from source.length to 1 by -1
+        out.add(source[i])
+    end
+    return out.join()
+end
+
+do truncate(source: text, maxLength: number, ending: text = "..."): text
+    if source.length <= maxLength
+        return source
+    end
+    if maxLength <= ending.length
+        return take(ending, maxLength)
+    end
+    return take(source, maxLength - ending.length) + ending
+end
+
+do wrap(source: text, lineWidth: number): list of text
+    set out: list of text = []
+    set current = ""
+    repeat each word in words(source)
+        if current.length == 0
+            current = word
+        otherwise if current.length + 1 + word.length <= lineWidth
+            current = current + " " + word
+        otherwise
+            out.add(current)
+            current = word
+        end
+    end
+    if current.length > 0
+        out.add(current)
+    end
+    return out
+end
+
+# Slicing & Character Helpers
+do charAt(source: text, position: number): text?
+    if position < 1 or position > source.length
+        return nothing
+    end
+    return source[position]
+end
+
+do slice(source: text, startPos: number, endPos: number = -1): text
+    set first = 1 if startPos < 1 otherwise startPos
+    set last = source.length if endPos == -1 or endPos > source.length otherwise endPos
+    if first > last
+        return ""
+    end
+    return source[first .. last]
+end
+
+do take(source: text, amount: number): text
+    if amount <= 0
+        return ""
+    end
+    return slice(source, 1, amount)
+end
+
+do drop(source: text, amount: number): text
+    if amount <= 0
+        return source
+    end
+    return slice(source, amount + 1)
+end
+
+do removePrefix(source: text, prefix: text): text
+    if startsWith(source, prefix)
+        return drop(source, prefix.length)
+    end
+    return source
+end
+
+do removeSuffix(source: text, suffix: text): text
+    if endsWith(source, suffix)
+        return take(source, source.length - suffix.length)
+    end
+    return source
+end
+
+do between(source: text, startMarker: text, endMarker: text): text?
+    set markerPos = indexOf(source, startMarker)
+    if markerPos == nothing
+        return nothing
+    end
+    set insideStart = markerPos + startMarker.length
+    set insideEnd = indexOf(source, endMarker, insideStart)
+    if insideEnd == nothing
+        return nothing
+    end
+    return slice(source, insideStart, insideEnd - 1)
+end

@@ -6,4 +6,4 @@ ICON=""
 if command -v windres > /dev/null; then
     windres assets/tomlang.rc -O coff -o build/icon.res && ICON="build/icon.res"
 fi
-gcc build/*.obj $ICON -o build/tomlang.exe -nostdlib -e Start -lkernel32 -Wl,--stack,8388608
+gcc build/*.obj $ICON -o build/tomlang.exe -nostdlib -e Start -lkernel32 -Xlinker --stack -Xlinker 8388608,8388608

@@ -133,29 +133,11 @@ do _readNumber(): Json
         _at += 1
     end
     set digits = _chars[start.._at - 1].join()
-    set mantissa: list of text = []
-    set power: list of text = []
-    set inPower = false
-    repeat each c in digits
-        if c == "e" or c == "E"
-            inPower = true
-        otherwise if inPower
-            power.add(c)
-        otherwise
-            mantissa.add(c)
-        end
-    end
     try
         if whole and digits.length < 19
             return number(digits)
         end
-        if not inPower
-            return decimal(digits)
-        end
-        if power.length > 0 and power[1] == "+"
-            power.remove(1)
-        end
-        return decimal(mantissa.join()) * 10.0 ^ decimal(power.join())
+        return decimal(digits)
     end
     _at = start
     _fail("bad number '{digits}'")

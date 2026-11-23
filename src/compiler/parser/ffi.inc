@@ -510,6 +510,94 @@ StructDecl:
     Fail ErrTooManyFields
 
 StructFieldType:
+    IfTok "char", .Char
+    call StructBaseType
+    mov r11, [rel TokPtr]
+    add r11, [rel TokLen]
+    cmp byte [r11], '['
+    je .Array
+    ret
+.Char:
+    mov r11, [rel TokPtr]
+    add r11, [rel TokLen]
+    cmp byte [r11], '['
+    jne StructBaseType.Byte
+    call StructCount_
+    mov r10, rax
+    mov r8, rax
+    mov eax, TText
+    mov edx, 10
+    mov ecx, 1
+    ret
+.Array:
+    push rax
+    push rdx
+    push r8
+    push rcx
+    push r10
+    call StructCount_
+    mov r11, rax
+    mov ecx, 32
+    push r11
+    call PermAlloc
+    pop r11
+    pop r10
+    pop rcx
+    pop r8
+    pop rdx
+    mov [rax], rdx
+    mov [rax + 8], r11
+    mov [rax + 16], r8
+    mov [rax + 24], r10
+    mov r10, rax
+    imul r8, r11
+    mov rax, [rsp]
+    push rcx
+    push r8
+    push r10
+    mov rcx, rax
+    call ListOf
+    pop r10
+    pop r8
+    pop rcx
+    add rsp, 8
+    mov edx, 11
+    ret
+
+StructCount_:
+    call Advance
+    call Advance
+    mov rcx, [rel TokPtr]
+    mov rdx, [rel TokLen]
+    xor eax, eax
+    test rdx, rdx
+    jz .Bad
+.Digit:
+    movzx r8d, byte [rcx]
+    sub r8d, '0'
+    cmp r8d, 9
+    ja .Bad
+    imul rax, rax, 10
+    add rax, r8
+    cmp rax, 65536
+    ja .Bad
+    inc rcx
+    dec rdx
+    jnz .Digit
+    test rax, rax
+    jz .Bad
+    push rax
+    push rax
+    call Advance
+    IfTok "]", .Ok
+.Bad:
+    Fail ErrStructCount
+.Ok:
+    pop rax
+    pop rax
+    ret
+
+StructBaseType:
     IfTok "byte", .Byte
     IfTok "short", .Short
     IfTok "int", .Int

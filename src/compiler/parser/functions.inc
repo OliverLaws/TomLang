@@ -77,6 +77,8 @@ DoWord:
     cmp qword [rel OpenBlocks], 0
     jne .Bad
 .Begin:
+    mov qword [rel ImplicitScanned], 0
+    mov qword [rel InParams], 0
     call Advance
     cmp qword [rel TokLen], 0
     je .Bad
@@ -237,6 +239,7 @@ DoWord:
     je .NoSelf
     call AddSelfParam
 .NoSelf:
+    mov qword [rel InParams], 1
     IfTok ")", .ParamsDone
 .ParamLoop:
     cmp qword [rel TokLen], 0
@@ -289,6 +292,10 @@ DoWord:
     test rax, rax
     jnz .SetParamType
     mov eax, TNum
+    mov r8, [rel FnSig]
+    test qword [r8 - SigFlags], 1
+    jnz .SetParamType
+    call ImplicitParamType
     jmp .SetParamType
 .Default:
     mov r8, [rel FnSig]
@@ -406,11 +413,13 @@ DoWord:
     call Pushback
     jmp .Prologue
 .ReturnType:
+    mov qword [rel InParams], 0
     call Advance
     call ParseTypeName
     mov r8, [rel FnSig]
     mov [r8 - 8], rax
 .Prologue:
+    mov qword [rel InParams], 0
     mov qword [rel AllowTypeVars], 0
     cmp qword [rel ForwardMode], 0
     jne ForwardFinish
@@ -458,10 +467,29 @@ DoWord:
     mov [rel FnInitCell], rax
     lea rcx, [rax + 8]
     call Compile
+    mov rax, [rel FnFrameSlot]
+    lea rcx, [rel PrimEnter]
+    cmp [rax - 8], rcx
+    jne .KeepEnter
+    lea rcx, [rel PrimEnterArgs]
+    mov [rax - 8], rcx
+.KeepEnter:
     DPush 0
     DPush 0
     DPush 0
-    DPush 0
+    xor eax, eax
+    mov rcx, [rel DefNamePtr]
+    cmp qword [rel DefNameLen], 7
+    jb .NotTaskFn
+    cmp dword [rcx], '_tlT'
+    jne .NotTaskFn
+    cmp word [rcx + 4], 'as'
+    jne .NotTaskFn
+    cmp byte [rcx + 6], 'k'
+    jne .NotTaskFn
+    mov eax, 1
+.NotTaskFn:
+    DPush rax
     DPush TagFn
     inc qword [rel OpenBlocks]
     ret
@@ -528,6 +556,8 @@ NestBegin:
     inc qword [rel NestDepth]
     mov qword [rel NestPending], 0
     mov qword [rel InFn], 0
+    mov rax, [rel OpenBlocks]
+    add [rel BlockBase], rax
     mov qword [rel OpenBlocks], 0
     mov qword [rel LocalCount], 0
     mov qword [rel LaterCount], 0
@@ -917,3 +947,87 @@ HintFunction:
     Fail ErrFunction
 HintLocal:
     Fail ErrLocal
+
+ImplicitParamType:
+    mov rax, [rel NestDepth]
+    cmp rax, [rel NestFloor]
+    jne .Number
+    cmp qword [rel OpMode], 0
+    jne .Number
+    cmp qword [rel ImplicitScanned], 0
+    jne .Pick
+    mov qword [rel ImplicitScanned], 1
+    mov qword [rel ImplicitUsed], 0
+    mov qword [rel ImplicitNext], 25
+    mov rcx, [rel DoStart]
+.Scan:
+    movzx eax, byte [rcx]
+    cmp al, 10
+    je .Pick
+    test al, al
+    je .Pick
+    sub eax, 'A'
+    cmp eax, 25
+    ja .ScanNext
+    movzx edx, byte [rcx - 1]
+    call .WordChar
+    jnz .ScanNext
+    movzx edx, byte [rcx + 1]
+    call .WordChar
+    jnz .ScanNext
+    bts qword [rel ImplicitUsed], rax
+.ScanNext:
+    inc rcx
+    jmp .Scan
+.Pick:
+    mov rax, [rel ImplicitNext]
+.Try:
+    test rax, rax
+    js .Number
+    bt qword [rel ImplicitUsed], rax
+    jnc .Got
+    dec rax
+    jmp .Try
+.Got:
+    bts qword [rel ImplicitUsed], rax
+    lea rcx, [rax - 1]
+    mov [rel ImplicitNext], rcx
+    cmp qword [rel InstanceMode], 0
+    jne .Bound
+    cmp qword [rel NestInInstance], 0
+    je .Unbound
+    cmp qword [rel ForwardMode], 0
+    je .Bound
+.Unbound:
+    cmp qword [rel AllowTypeVars], 0
+    je .Number
+    mov qword [rel GenericFound], 1
+    mov ecx, eax
+    jmp VarTypeOf
+.Bound:
+    lea rcx, [rel InstanceBindings]
+    mov rax, [rcx + rax * 8]
+    test rax, rax
+    jz .Number
+    ret
+.Number:
+    mov eax, TNum
+    ret
+.WordChar:
+    cmp dl, '_'
+    je .IsWord
+    cmp dl, '0'
+    jb .NotWord
+    cmp dl, '9'
+    jbe .IsWord
+    or dl, 32
+    cmp dl, 'a'
+    jb .NotWord
+    cmp dl, 'z'
+    jbe .IsWord
+.NotWord:
+    cmp dl, dl
+    ret
+.IsWord:
+    test dl, dl
+    ret

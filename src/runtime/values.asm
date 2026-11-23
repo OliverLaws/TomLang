@@ -1,4 +1,5 @@
 %include "macros.inc"
+extern MemCopy
 
 global PrimToDec
 global PrimToDecUnder
@@ -23,6 +24,7 @@ global PrimFormat
 global MakeTextFrom
 global ParseDecimalText
 extern Alloc
+extern AllocAtomic
 extern TypeTable
 extern PrintString
 extern PrintNewLine
@@ -76,18 +78,13 @@ MakeTextFrom:
     mov rsi, rcx
     mov rdi, rdx
     lea rcx, [rdx + 8]
-    call Alloc
+    call AllocAtomic
     mov rbx, rax
     mov [rbx], rdi
-    xor ecx, ecx
-.Copy:
-    cmp rcx, rdi
-    jae .Done
-    mov al, [rsi + rcx]
-    mov [rbx + 8 + rcx], al
-    inc rcx
-    jmp .Copy
-.Done:
+    mov rcx, rsi
+    lea rdx, [rbx + 8]
+    mov r8, rdi
+    call MemCopy
     mov rax, rbx
     pop rdi
     pop rsi
@@ -117,6 +114,241 @@ WriteUInt:
 .Done:
     ret
 
+
+ScaleTen:
+    test rcx, rcx
+    jz .Done
+    lea r9, [rel Pow10]
+    js .Down
+.Up:
+    mov r8, rcx
+    cmp r8, 18
+    jbe .UpStep
+    mov r8, 18
+.UpStep:
+    fild qword [r9 + r8 * 8]
+    fmulp st1, st0
+    sub rcx, r8
+    jnz .Up
+    ret
+.Down:
+    neg rcx
+.DownLoop:
+    mov r8, rcx
+    cmp r8, 18
+    jbe .DownStep
+    mov r8, 18
+.DownStep:
+    fild qword [r9 + r8 * 8]
+    fdivp st1, st0
+    sub rcx, r8
+    jnz .DownLoop
+.Done:
+    ret
+
+%define SdX    0
+%define SdLog  8
+%define SdM    16
+%define SdDn   24
+%define SdBack 32
+%define SdCw   40
+%define SdNewCw 42
+%define SdDig  48
+%define SdFrame 80
+
+ShortestDec:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    sub rsp, SdFrame
+    movsd [rsp + SdX], xmm0
+    fnstcw [rsp + SdCw]
+    mov word [rsp + SdNewCw], 0x37F
+    fldcw [rsp + SdNewCw]
+    fldlg2
+    fld qword [rsp + SdX]
+    fyl2x
+    fstp qword [rsp + SdLog]
+    movsd xmm1, [rsp + SdLog]
+    roundsd xmm1, xmm1, 1
+    cvtsd2si r12, xmm1
+.Again:
+    fld qword [rsp + SdX]
+    mov rcx, 16
+    sub rcx, r12
+    call ScaleTen
+    fistp qword [rsp + SdM]
+    mov rax, [rsp + SdM]
+    mov rcx, 10000000000000000
+    cmp rax, rcx
+    jae .NotSmall
+    dec r12
+    jmp .Again
+.NotSmall:
+    mov rcx, 100000000000000000
+    cmp rax, rcx
+    jb .HaveM
+    inc r12
+    jmp .Again
+.HaveM:
+    mov r13, rax
+    mov ebx, 15
+    mov rax, [rsp + SdX]
+    shr rax, 52
+    test eax, eax
+    jnz .TryN
+    mov ebx, 1
+.TryN:
+    mov rcx, 17
+    sub rcx, rbx
+    lea rax, [rel Pow10]
+    mov rsi, [rax + rcx * 8]
+    mov rax, r13
+    mov rdx, rsi
+    shr rdx, 1
+    add rax, rdx
+    xor edx, edx
+    div rsi
+    mov r14, r12
+    lea rcx, [rel Pow10]
+    cmp rax, [rcx + rbx * 8]
+    jb .NoOver
+    xor edx, edx
+    mov ecx, 10
+    div rcx
+    inc r14
+.NoOver:
+    mov [rsp + SdDn], rax
+    cmp rbx, 17
+    je .Use
+    fild qword [rsp + SdDn]
+    mov rcx, r14
+    sub rcx, rbx
+    inc rcx
+    call ScaleTen
+    fstp qword [rsp + SdBack]
+    mov rax, [rsp + SdBack]
+    cmp rax, [rsp + SdX]
+    je .Use
+    inc rbx
+    jmp .TryN
+.Use:
+    fldcw [rsp + SdCw]
+    mov rax, [rsp + SdDn]
+    mov rsi, rbx
+.Strip:
+    cmp rsi, 1
+    jbe .Stripped
+    mov r8, rax
+    xor edx, edx
+    mov ecx, 10
+    div rcx
+    test rdx, rdx
+    jz .Zero
+    mov rax, r8
+    jmp .Stripped
+.Zero:
+    dec rsi
+    jmp .Strip
+.Stripped:
+    push rdi
+    lea rdi, [rsp + 8 + SdDig]
+    call WriteUInt
+    pop rdi
+    lea rbx, [rsp + SdDig]
+    cmp r14, -5
+    jl .Sci
+    cmp r14, 16
+    jge .Sci
+    test r14, r14
+    js .Small
+    xor ecx, ecx
+.IntPart:
+    cmp rcx, r14
+    jg .IntDone
+    mov al, '0'
+    cmp rcx, rsi
+    jae .IntPut
+    mov al, [rbx + rcx]
+.IntPut:
+    mov [rdi], al
+    inc rdi
+    inc rcx
+    jmp .IntPart
+.IntDone:
+    mov byte [rdi], '.'
+    inc rdi
+    cmp rcx, rsi
+    jb .Frac
+    mov byte [rdi], '0'
+    inc rdi
+    jmp .Out
+.Frac:
+    cmp rcx, rsi
+    jae .Out
+    mov al, [rbx + rcx]
+    mov [rdi], al
+    inc rdi
+    inc rcx
+    jmp .Frac
+.Small:
+    mov word [rdi], '0.'
+    add rdi, 2
+    mov rcx, r14
+    neg rcx
+    dec rcx
+.SmallZeros:
+    test rcx, rcx
+    jz .SmallDigits
+    mov byte [rdi], '0'
+    inc rdi
+    dec rcx
+    jmp .SmallZeros
+.SmallDigits:
+    xor ecx, ecx
+    jmp .Frac
+.Sci:
+    mov al, [rbx]
+    mov [rdi], al
+    mov byte [rdi + 1], '.'
+    add rdi, 2
+    cmp rsi, 1
+    ja .SciFrac
+    mov byte [rdi], '0'
+    inc rdi
+    jmp .SciExp
+.SciFrac:
+    mov ecx, 1
+.SciLoop:
+    cmp rcx, rsi
+    jae .SciExp
+    mov al, [rbx + rcx]
+    mov [rdi], al
+    inc rdi
+    inc rcx
+    jmp .SciLoop
+.SciExp:
+    mov byte [rdi], 'e'
+    mov byte [rdi + 1], '+'
+    mov rax, r14
+    test rax, rax
+    jns .SciPos
+    mov byte [rdi + 1], '-'
+    neg rax
+.SciPos:
+    add rdi, 2
+    call WriteUInt
+.Out:
+    add rsp, SdFrame
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
 FormatDec:
     push rbx
     push rdi
@@ -129,6 +361,18 @@ FormatDec:
     mov r13d, 1
     andpd xmm0, [rel SignMask]
 .Positive:
+    test rcx, rcx
+    jns .Fixed
+    movq rax, xmm0
+    test rax, rax
+    jz .Fixed
+    shr rax, 52
+    cmp eax, 0x7ff
+    je .Fixed
+    lea rdi, [rel DecBuf]
+    call ShortestDec
+    jmp .Finish
+.Fixed:
     ucomisd xmm0, [rel BigDec]
     jae .Huge
     test rcx, rcx
@@ -371,34 +615,18 @@ ParseDecimalText:
 .ExpAdd:
     add rbx, rsi
 .Build:
-    cvtsi2sd xmm0, rax
-    lea rcx, [rel Pow10]
-.Up:
-    cmp rbx, 0
-    jle .Down
-    mov r8, rbx
-    cmp r8, 18
-    jbe .UpStep
-    mov r8, 18
-.UpStep:
-    cvtsi2sd xmm1, qword [rcx + r8 * 8]
-    mulsd xmm0, xmm1
-    sub rbx, r8
-    jmp .Up
-.Down:
-    cmp rbx, 0
-    jge .Sign
-    mov r8, rbx
-    neg r8
-    cmp r8, 18
-    jbe .DownStep
-    mov r8, 18
-.DownStep:
-    cvtsi2sd xmm1, qword [rcx + r8 * 8]
-    divsd xmm0, xmm1
-    add rbx, r8
-    jmp .Down
-.Sign:
+    sub rsp, 24
+    fnstcw [rsp + 16]
+    mov word [rsp + 18], 0x37F
+    fldcw [rsp + 18]
+    mov [rsp], rax
+    fild qword [rsp]
+    mov rcx, rbx
+    call ScaleTen
+    fstp qword [rsp + 8]
+    fldcw [rsp + 16]
+    movsd xmm0, [rsp + 8]
+    add rsp, 24
     test r11, r11
     jz .Done
     xorpd xmm1, xmm1

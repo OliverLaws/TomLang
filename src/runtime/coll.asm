@@ -23,6 +23,7 @@ global PrimTextLength
 global PrimTextChars
 global Utf8Offset
 global U8Text
+global LetterCache
 global PrimCode
 global PrimChar
 global PrimBitAnd
@@ -31,6 +32,7 @@ global PrimBitXor
 global PrimShiftLeft
 global PrimShiftRight
 extern Alloc
+extern AllocAtomic
 extern Abort
 extern MakeTextFrom
 
@@ -45,6 +47,7 @@ ErrIndexLen  equ $ - ErrIndex
 section .bss
 CharBuf resb 8
 U8Text resq 1
+LetterCache resq LetterCacheQ
 U8Index resq 1
 U8Off resq 1
 
@@ -603,7 +606,7 @@ PrimRange:
 .Cap:
     mov [rax + 8], rcx
     shl rcx, 3
-    call Alloc
+    call AllocAtomic
     pop rdx
     mov [rdx + 16], rax
     xor ecx, ecx
@@ -619,6 +622,23 @@ PrimRange:
     NEXT
 
 Utf8Offset:
+    push rdx
+    call TextLetters
+    pop rdx
+    cmp rax, [rcx]
+    jne .Unicode
+    test rdx, rdx
+    jle .Bad
+    dec rdx
+    cmp rdx, rax
+    ja .BadDec
+    mov rax, rdx
+    inc rdx
+    ret
+.BadDec:
+    inc rdx
+    jmp .Bad
+.Unicode:
     cmp rcx, [rel U8Text]
     jne .Fresh
     mov r8, [rel U8Index]
@@ -705,21 +725,66 @@ CharBytes:
     ret
 
 Utf8Count:
+    call TextLetters
+    ret
+
+TextLetters:
     mov r10, [rcx]
+    cmp r10, 64
+    jb CountLetters
+    mov rax, rcx
+    shr rax, 4
+    and eax, LetterCacheQ / 2 - 1
+    shl eax, 4
+    push r11
+    lea r11, [rel LetterCache]
+    cmp [r11 + rax], rcx
+    jne .Miss
+    mov rax, [r11 + rax + 8]
+    pop r11
+    ret
+.Miss:
+    push rax
+    call CountLetters
+    mov r9, rax
+    pop rax
+    mov [r11 + rax], rcx
+    mov [r11 + rax + 8], r9
+    mov rax, r9
+    pop r11
+    ret
+
+CountLetters:
+    push r11
     xor eax, eax
     xor r9d, r9d
-.Loop:
+    mov r11, 0xBFBFBFBFBFBFBFBF
+    movq xmm5, r11
+    punpcklqdq xmm5, xmm5
+.Vec:
+    lea r11, [r9 + 16]
+    cmp r11, r10
+    ja .Tail
+    movdqu xmm4, [rcx + 8 + r9]
+    pcmpgtb xmm4, xmm5
+    pmovmskb r11d, xmm4
+    popcnt r11d, r11d
+    add rax, r11
+    add r9, 16
+    jmp .Vec
+.Tail:
     cmp r9, r10
     jae .Done
-    movzx edx, byte [rcx + 8 + r9]
-    and edx, 0xC0
-    cmp edx, 0x80
+    movzx r11d, byte [rcx + 8 + r9]
+    and r11d, 0xC0
+    cmp r11d, 0x80
     je .Next
     inc rax
 .Next:
     inc r9
-    jmp .Loop
+    jmp .Tail
 .Done:
+    pop r11
     ret
 
 PrimTextLength:
@@ -967,4 +1032,497 @@ PrimIfaceCall:
     mov rax, [r9 + 16 + rcx * 8]
     RPush r14
     mov r14, rax
+    NEXT
+
+global PrimDeepEq
+global DeepEqual
+extern TypeTable
+
+PrimDeepEq:
+    DPop r8
+    DPop rdx
+    DPop rcx
+    call DeepEqual
+    DPush rax
+    NEXT
+
+DeepEqual:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    mov rbx, rcx
+    mov rsi, rdx
+    mov rax, r8
+    shl rax, 5
+    lea rdi, [rel TypeTable]
+    add rdi, rax
+    mov rax, [rdi]
+    cmp rax, 4
+    je .Dec
+    cmp rax, 2
+    je .Text
+    cmp rax, 5
+    je .List
+    cmp rax, 6
+    je .Map
+    cmp rax, 7
+    je .Rec
+    cmp rax, 11
+    je .Union
+    cmp rax, 13
+    je .Union
+    cmp rax, 12
+    je .True
+    cmp rbx, rsi
+    je .True
+    jmp .False
+.Dec:
+    movq xmm0, rbx
+    movq xmm1, rsi
+    ucomisd xmm0, xmm1
+    jp .False
+    je .True
+    jmp .False
+.Text:
+    cmp rbx, rsi
+    je .True
+    mov rcx, rbx
+    mov rdx, rsi
+    call TextEqual
+    jmp .Done
+.List:
+    cmp rbx, rsi
+    je .True
+    mov rax, [rbx]
+    cmp rax, [rsi]
+    jne .False
+    mov r13, [rdi + 8]
+    xor r12d, r12d
+.ListLoop:
+    cmp r12, [rbx]
+    jae .True
+    mov rcx, [rbx + 16]
+    mov rcx, [rcx + r12 * 8]
+    mov rdx, [rsi + 16]
+    mov rdx, [rdx + r12 * 8]
+    mov r8, r13
+    call DeepEqual
+    test eax, eax
+    jz .False
+    inc r12
+    jmp .ListLoop
+.Map:
+    cmp rbx, rsi
+    je .True
+    mov rax, [rbx]
+    cmp rax, [rsi]
+    jne .False
+    mov r13, [rdi + 8]
+    xor r14d, r14d
+    mov rax, [rdi + 16]
+    test rax, rax
+    jz .MapKeys
+    cmp rax, 2
+    je .MapKeys
+    mov r14d, 1
+.MapKeys:
+    xor r12d, r12d
+.MapLoop:
+    cmp r12, [rbx]
+    jae .True
+    mov rcx, rsi
+    mov rdx, [rbx + 16]
+    mov rdx, [rdx + r12 * 8]
+    mov r8, r14
+    call MapFind
+    cmp rax, -1
+    je .False
+    mov rdx, [rsi + 24]
+    mov rdx, [rdx + rax * 8]
+    mov rcx, [rbx + 24]
+    mov rcx, [rcx + r12 * 8]
+    mov r8, r13
+    call DeepEqual
+    test eax, eax
+    jz .False
+    inc r12
+    jmp .MapLoop
+.Rec:
+    cmp rbx, rsi
+    je .True
+    xor r12d, r12d
+.RecLoop:
+    cmp r12, [rdi + 16]
+    jae .True
+    lea rax, [r12 + r12 * 2]
+    mov r8, [rdi + 24]
+    mov r8, [r8 + rax * 8 + 16]
+    mov rcx, [rbx + r12 * 8]
+    mov rdx, [rsi + r12 * 8]
+    call DeepEqual
+    test eax, eax
+    jz .False
+    inc r12
+    jmp .RecLoop
+.Union:
+    cmp rbx, rsi
+    je .True
+    test rbx, rbx
+    jz .False
+    test rsi, rsi
+    jz .False
+    mov r8, [rbx]
+    cmp r8, [rsi]
+    jne .False
+    mov rcx, [rbx + 8]
+    mov rdx, [rsi + 8]
+    call DeepEqual
+    jmp .Done
+.True:
+    mov eax, 1
+    jmp .Done
+.False:
+    xor eax, eax
+.Done:
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+global PrimListSort
+extern MemCopy
+
+SortLess:
+    cmp r12, 1
+    je .Dec
+    cmp r12, 2
+    je .Text
+    xor eax, eax
+    cmp rcx, rdx
+    setl al
+    ret
+.Dec:
+    movq xmm0, rcx
+    movq xmm1, rdx
+    xor eax, eax
+    ucomisd xmm0, xmm1
+    setb al
+    ret
+.Text:
+    push rbx
+    mov r8, [rcx]
+    mov r9, [rdx]
+    mov r10, r8
+    cmp r10, r9
+    jbe .Min
+    mov r10, r9
+.Min:
+    xor r11d, r11d
+.Loop:
+    cmp r11, r10
+    jae .Lengths
+    movzx eax, byte [rcx + 8 + r11]
+    movzx ebx, byte [rdx + 8 + r11]
+    cmp eax, ebx
+    jne .Differ
+    inc r11
+    jmp .Loop
+.Differ:
+    setb al
+    movzx eax, al
+    pop rbx
+    ret
+.Lengths:
+    xor eax, eax
+    cmp r8, r9
+    setb al
+    pop rbx
+    ret
+
+%define SrtN     0
+%define SrtSrc   8
+%define SrtDst   16
+%define SrtWidth 24
+%define SrtI     32
+%define SrtMid   40
+%define SrtHi    48
+%define SrtList  56
+%define SrtFrame 72
+
+PrimListSort:
+    mov r8, [r15 - 8]
+    mov rax, [r15 - 16]
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    sub rsp, SrtFrame
+    mov r12, r8
+    mov [rsp + SrtList], rax
+    mov rcx, [rax]
+    mov [rsp + SrtN], rcx
+    cmp rcx, 2
+    jb .Done
+    mov rsi, [rax + 16]
+    xor ebx, ebx
+.RunStart:
+    cmp rbx, [rsp + SrtN]
+    jae .RunsDone
+    lea r13, [rbx + 16]
+    cmp r13, [rsp + SrtN]
+    jbe .RunEnd
+    mov r13, [rsp + SrtN]
+.RunEnd:
+    lea rdi, [rbx + 1]
+.InsOuter:
+    cmp rdi, r13
+    jae .InsDone
+    mov r14, [rsi + rdi * 8]
+    mov rax, rdi
+.InsInner:
+    cmp rax, rbx
+    jbe .InsPlace
+    push rax
+    mov rcx, r14
+    mov rdx, [rsi + rax * 8 - 8]
+    call SortLess
+    mov r8d, eax
+    pop rax
+    test r8d, r8d
+    jz .InsPlace
+    mov rcx, [rsi + rax * 8 - 8]
+    mov [rsi + rax * 8], rcx
+    dec rax
+    jmp .InsInner
+.InsPlace:
+    mov [rsi + rax * 8], r14
+    inc rdi
+    jmp .InsOuter
+.InsDone:
+    mov rbx, r13
+    jmp .RunStart
+.RunsDone:
+    cmp qword [rsp + SrtN], 16
+    jbe .Done
+    mov rcx, [rsp + SrtN]
+    shl rcx, 3
+    call Alloc
+    mov [rsp + SrtDst], rax
+    mov rax, [rsp + SrtList]
+    mov rax, [rax + 16]
+    mov [rsp + SrtSrc], rax
+    mov qword [rsp + SrtWidth], 16
+.Pass:
+    mov rax, [rsp + SrtWidth]
+    cmp rax, [rsp + SrtN]
+    jae .Finish
+    mov qword [rsp + SrtI], 0
+.Block:
+    mov rax, [rsp + SrtI]
+    cmp rax, [rsp + SrtN]
+    jae .PassDone
+    mov rcx, rax
+    add rcx, [rsp + SrtWidth]
+    cmp rcx, [rsp + SrtN]
+    jbe .MidOk
+    mov rcx, [rsp + SrtN]
+.MidOk:
+    mov [rsp + SrtMid], rcx
+    add rcx, [rsp + SrtWidth]
+    cmp rcx, [rsp + SrtN]
+    jbe .HiOk
+    mov rcx, [rsp + SrtN]
+.HiOk:
+    mov [rsp + SrtHi], rcx
+    mov rbx, [rsp + SrtI]
+    mov r13, [rsp + SrtMid]
+    mov rdi, [rsp + SrtI]
+    mov rsi, [rsp + SrtSrc]
+    mov r14, [rsp + SrtDst]
+.Merge:
+    cmp rbx, [rsp + SrtMid]
+    jae .TakeRight
+    cmp r13, [rsp + SrtHi]
+    jae .TakeLeft
+    mov rcx, [rsi + r13 * 8]
+    mov rdx, [rsi + rbx * 8]
+    call SortLess
+    test eax, eax
+    jnz .TakeRight
+.TakeLeft:
+    cmp rbx, [rsp + SrtMid]
+    jae .BlockDone
+    mov rax, [rsi + rbx * 8]
+    mov [r14 + rdi * 8], rax
+    inc rbx
+    inc rdi
+    jmp .Merge
+.TakeRight:
+    cmp r13, [rsp + SrtHi]
+    jae .BlockDone
+    mov rax, [rsi + r13 * 8]
+    mov [r14 + rdi * 8], rax
+    inc r13
+    inc rdi
+    jmp .Merge
+.BlockDone:
+    mov rax, [rsp + SrtHi]
+    mov [rsp + SrtI], rax
+    jmp .Block
+.PassDone:
+    mov rax, [rsp + SrtSrc]
+    mov rcx, [rsp + SrtDst]
+    mov [rsp + SrtSrc], rcx
+    mov [rsp + SrtDst], rax
+    shl qword [rsp + SrtWidth], 1
+    jmp .Pass
+.Finish:
+    mov rax, [rsp + SrtList]
+    mov rdx, [rax + 16]
+    mov rcx, [rsp + SrtSrc]
+    cmp rcx, rdx
+    je .Done
+    mov r8, [rsp + SrtN]
+    shl r8, 3
+    call MemCopy
+.Done:
+    add rsp, SrtFrame
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    sub r15, 16
+    NEXT
+
+global PrimListRemoveValue
+global PrimMapGetOr
+global PrimMapGetOrInt
+global PrimMapRemove
+global PrimMapRemoveInt
+
+PrimListRemoveValue:
+    mov r8, [r14]
+    add r14, 8
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    mov r12, r8
+    mov rsi, [r15 - 8]
+    mov rbx, [r15 - 16]
+    xor edi, edi
+.Find:
+    cmp rdi, [rbx]
+    jae .Missing
+    mov rcx, [rbx + 16]
+    mov rcx, [rcx + rdi * 8]
+    mov rdx, rsi
+    mov r8, r12
+    call DeepEqual
+    test eax, eax
+    jnz .Found
+    inc rdi
+    jmp .Find
+.Found:
+    mov rcx, [rbx + 16]
+.Shift:
+    lea rax, [rdi + 1]
+    cmp rax, [rbx]
+    jae .Shifted
+    mov rdx, [rcx + rax * 8]
+    mov [rcx + rdi * 8], rdx
+    inc rdi
+    jmp .Shift
+.Shifted:
+    dec qword [rbx]
+    mov eax, 1
+    jmp .Done
+.Missing:
+    xor eax, eax
+.Done:
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    sub r15, 16
+    DPush rax
+    NEXT
+
+PrimMapGetOrInt:
+    mov r8d, 1
+    jmp MapGetOrCommon
+PrimMapGetOr:
+    xor r8d, r8d
+MapGetOrCommon:
+    mov rcx, [r15 - 24]
+    mov rdx, [r15 - 16]
+    call MapFind
+    cmp rax, -1
+    je .Default
+    mov rcx, [r15 - 24]
+    mov rcx, [rcx + 24]
+    mov rax, [rcx + rax * 8]
+    sub r15, 24
+    DPush rax
+    NEXT
+.Default:
+    mov rax, [r15 - 8]
+    sub r15, 24
+    DPush rax
+    NEXT
+
+PrimMapRemoveInt:
+    mov r8d, 1
+    jmp MapRemoveCommon
+PrimMapRemove:
+    xor r8d, r8d
+MapRemoveCommon:
+    push rbx
+    push r12
+    mov r12, r8
+    mov rbx, [r15 - 16]
+    mov rcx, rbx
+    mov rdx, [r15 - 8]
+    call MapFind
+    cmp rax, -1
+    je .Missing
+    mov rcx, [rbx + 16]
+    mov rdx, [rbx + 24]
+.Shift:
+    lea r8, [rax + 1]
+    cmp r8, [rbx]
+    jae .Shifted
+    mov r9, [rcx + r8 * 8]
+    mov [rcx + rax * 8], r9
+    mov r9, [rdx + r8 * 8]
+    mov [rdx + rax * 8], r9
+    inc rax
+    jmp .Shift
+.Shifted:
+    dec qword [rbx]
+    cmp qword [rbx + 32], 0
+    je .Removed
+    mov rcx, rbx
+    mov r8, r12
+    call MapRehash
+.Removed:
+    mov eax, 1
+    jmp .Done
+.Missing:
+    xor eax, eax
+.Done:
+    pop r12
+    pop rbx
+    sub r15, 16
+    DPush rax
     NEXT

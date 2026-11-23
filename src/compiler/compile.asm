@@ -1,9 +1,19 @@
 %include "macros.inc"
+%define FuseMask 4095
 
 global CodeBuf
 global InstEnd
 global Here
 global Compile
+global CompileOp
+global FuseBranch
+global LastOpAt
+extern FuseTable
+extern BranchTable
+extern StoreTable
+extern PrimLocalGet
+extern PrimLit
+extern PrimGetG
 global DictHere
 global EnterInstanceSpace
 global LeaveInstanceSpace
@@ -28,6 +38,8 @@ extern Abort
 InstRegion equ 1048576
 
 section .bss
+FuseHashTab resq 4096
+FuseReady resb 8
 CombBuf   resb 512
 CodeBuf   resq 1048576
 CodeEnd   resq 64
@@ -42,6 +54,9 @@ DataEnd   resq 64
 Here      resq 1
 SavedHere resq 1
 FnEntry   resq 1
+LastOpAt  resq 1
+PrevOpAt  resq 1
+FusedAt   resq 1
 
 section .data
 DictHere dq DictSpace
@@ -137,6 +152,237 @@ LeaveInstanceSpace:
     mov [rel DictEndPtr], rax
     ret
 
+IsProducer:
+    lea r10, [rel PrimLocalGet]
+    cmp rdx, r10
+    je .Yes
+    lea r10, [rel PrimLit]
+    cmp rdx, r10
+    je .Yes
+    lea r10, [rel PrimGetG]
+    cmp rdx, r10
+    je .Yes
+    xor r10d, r10d
+    ret
+.Yes:
+    mov r10d, 1
+    ret
+
+FuseKey:
+    mov rax, rdx
+    imul rax, rax, 0x5BD1E995
+    mov r10, r11
+    imul r10, r10, 0x2545F491
+    add rax, r10
+    mov r10, rcx
+    imul r10, r10, 0x27D4EB2F
+    add rax, r10
+    shr rax, 17
+    ret
+
+FindFuse:
+    push r9
+    cmp byte [rel FuseReady], 0
+    jne .Ready
+    call BuildFuse
+.Ready:
+    call FuseKey
+    lea r9, [rel FuseHashTab]
+.Probe:
+    and eax, FuseMask
+    mov r10, [r9 + rax * 8]
+    test r10, r10
+    jz .None
+    cmp [r10], rdx
+    jne .Next
+    cmp [r10 + 8], r11
+    jne .Next
+    cmp [r10 + 16], rcx
+    jne .Next
+    mov rax, [r10 + 24]
+    pop r9
+    ret
+.Next:
+    inc eax
+    jmp .Probe
+.None:
+    xor eax, eax
+    pop r9
+    ret
+
+BuildFuse:
+    push rbx
+    push rcx
+    push rdx
+    push r11
+    lea rbx, [rel FuseTable]
+    lea r9, [rel FuseHashTab]
+.Row:
+    cmp qword [rbx], 0
+    je .Done
+    mov rdx, [rbx]
+    mov r11, [rbx + 8]
+    mov rcx, [rbx + 16]
+    call FuseKey
+.Probe:
+    and eax, FuseMask
+    cmp qword [r9 + rax * 8], 0
+    je .Put
+    inc eax
+    jmp .Probe
+.Put:
+    mov [r9 + rax * 8], rbx
+    add rbx, 32
+    jmp .Row
+.Done:
+    mov byte [rel FuseReady], 1
+    pop r11
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+CompileOp:
+    push rdx
+    push r8
+    push r9
+    push r10
+    push r11
+    push rax
+    mov r8, [rel LastOpAt]
+    mov r9, [rel PrevOpAt]
+    mov [rel PrevOpAt], r8
+    mov rax, [rel Here]
+    mov [rel LastOpAt], rax
+    lea r10, [r8 + 8]
+    cmp r10, rax
+    jne .NotStore
+    mov rdx, [r8]
+    lea r10, [rel StoreTable]
+.StoreScan:
+    cmp qword [r10], 0
+    je .NotStore
+    cmp [r10], rdx
+    jne .StoreNext
+    cmp [r10 + 8], rcx
+    jne .StoreNext
+    mov rdx, [r10 + 16]
+    mov [r8], rdx
+    jmp .Plain
+.StoreNext:
+    add r10, 24
+    jmp .StoreScan
+.NotStore:
+    lea r10, [r8 + 16]
+    cmp r10, rax
+    jne .Plain
+    mov rdx, [r8]
+    call IsProducer
+    test r10, r10
+    jz .Plain
+    lea r10, [r9 + 16]
+    cmp r10, r8
+    jne .Single
+    mov r11, rdx
+    mov rdx, [r9]
+    call IsProducer
+    test r10, r10
+    jz .SingleBack
+    call FindFuse
+    test rax, rax
+    jz .SingleBack
+    mov [r9], rax
+    mov [rel FusedAt], r9
+    jmp .Plain
+.SingleBack:
+    mov rdx, r11
+.Single:
+    xor r11d, r11d
+    call FindFuse
+    test rax, rax
+    jz .Plain
+    mov [r8], rax
+    mov [rel FusedAt], r8
+.Plain:
+    pop rax
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdx
+    jmp Compile
+
+FuseBranch:
+    push rcx
+    push rdx
+    push r8
+    push r9
+    push r10
+    push r11
+    push rax
+    mov r8, [rel LastOpAt]
+    mov qword [rel LastOpAt], 0
+    mov qword [rel PrevOpAt], 0
+    mov rax, [rel Here]
+    lea r9, [r8 + 8]
+    cmp r9, rax
+    jne .Done
+    mov rdx, [r8]
+    lea r10, [rel BranchTable]
+.Scan:
+    mov r9, [r10]
+    test r9, r9
+    jz .Done
+    cmp r9, rdx
+    je .Found
+    add r10, 16
+    jmp .Scan
+.Found:
+    mov rcx, [r10 + 8]
+    mov [r8], rcx
+    mov r9, [rel FusedAt]
+    lea rax, [r9 + 16]
+    cmp rax, r8
+    je .Prod
+    lea rax, [r9 + 32]
+    cmp rax, r8
+    jne .Done
+.Prod:
+    mov rax, [r9]
+    lea r10, [rel FuseTable]
+.FindOld:
+    cmp qword [r10], 0
+    je .Done
+    cmp [r10 + 24], rax
+    je .HaveOld
+    add r10, 32
+    jmp .FindOld
+.HaveOld:
+    cmp [r10 + 16], rdx
+    jne .Done
+    mov rdx, [r10]
+    mov r11, [r10 + 8]
+    lea rax, [r9 + 16]
+    test r11, r11
+    jz .Layout
+    lea rax, [r9 + 32]
+.Layout:
+    cmp rax, r8
+    jne .Done
+    call FindFuse
+    test rax, rax
+    jz .Done
+    mov [r9], rax
+.Done:
+    pop rax
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    ret
+
 Compile:
     mov rax, [rel Here]
     cmp rax, [rel DictStartPtr]
@@ -229,6 +475,8 @@ CreateVar:
     mov qword [rax], 0
     add rax, 8
     mov qword [rax], 0
+    add rax, 8
+    mov qword [rax], 0
     mov [r8 + 8], rax
     lea r9, [rax + 8]
     mov [rel DataHere], r9
@@ -238,8 +486,11 @@ AllocSlot:
     mov rax, [rel DataHere]
     add rax, 7
     and rax, -8
-    lea r8, [rax + 16]
+    lea r8, [rax + 32]
     DataRoom r8
+    mov qword [rax], 0
+    mov qword [rax + 8], 0
+    add rax, 16
     mov qword [rax], 0
     lea r8, [rax + 8]
     mov [rel DataHere], r8

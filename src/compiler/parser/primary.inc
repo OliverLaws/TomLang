@@ -44,10 +44,22 @@ ParsePrimary:
     mov rcx, rax
     mov rdx, [rel TokLen]
     xor r8d, r8d
+    cmp rdx, 2
+    jb .FindDot
+    movzx eax, byte [rcx + 1]
+    or eax, 32
+    cmp eax, 'x'
+    je .Integer
+    cmp eax, 'b'
+    je .Integer
 .FindDot:
     cmp r8, rdx
     jae .Integer
     cmp byte [rcx + r8], '.'
+    je .Decimal
+    movzx eax, byte [rcx + r8]
+    or eax, 32
+    cmp eax, 'e'
     je .Decimal
     inc r8
     jmp .FindDot
@@ -194,7 +206,24 @@ ParsePrimary:
     call TypeOf
     mov [rel ExprType], rax
     mov [rel LastVarRef], rbx
-    jmp Advance
+    mov rcx, rax
+    call TypeKind
+    cmp rax, KFunc
+    jne Advance
+    mov rcx, rbx
+    call FindVarSig
+    test rax, rax
+    jz Advance
+    push rax
+    call Advance
+    IfTok "(", .SigValueCall
+    add rsp, 8
+    ret
+.SigValueCall:
+    pop rax
+    mov qword [rel LastVarRef], 0
+    mov r9d, 2
+    jmp .CallSetup
 .Func:
     push rax
     call Advance
@@ -206,6 +235,9 @@ ParsePrimary:
     mov rcx, [rsp]
     call Compile
     pop rcx
+    mov [rel LastFnValSig], rcx
+    mov rax, [rel Here]
+    mov [rel LastFnValHere], rax
     call FuncTypeOfSig
     mov [rel ExprType], rax
     ret
@@ -251,7 +283,7 @@ ParsePrimary:
     jz .NoRecv
     mov qword [rsp], 1
     mov qword [rsp + 648], 1
-    cmp qword [rsp + 928], 0
+    test qword [rsp + 928], 1
     je .NoRecv
     mov qword [rsp + 936], 0
     mov [rel ExprType], rax
@@ -328,7 +360,7 @@ ParsePrimary:
     call CallHint
 .P1Parse:
     call ParseExpr
-    cmp qword [rsp + 928], 0
+    test qword [rsp + 928], 1
     je .P1Typed
     call CallUnify
 .P1Typed:
@@ -344,7 +376,7 @@ ParsePrimary:
     mov rax, [rsp + 664]
     mov [rel Here], rax
     mov qword [rsp + 680], 0
-    cmp qword [rsp + 928], 0
+    test qword [rsp + 928], 1
     je .P2Start
     call CallInstance
 .P2Start:
@@ -485,6 +517,14 @@ ParsePrimary:
     call Advance
     call Advance
 .P2Bare:
+    test qword [rsp + 928], 2
+    jz .DirectCall
+    CompilePrim PrimCallValue
+    mov rcx, [rsp + 640]
+    mov rcx, [rcx - 16]
+    call Compile
+    jmp .CallEmitted
+.DirectCall:
     mov rax, [rsp + 640]
     test qword [rax - SigFlags], 4
     jz .NoLink
@@ -493,6 +533,7 @@ ParsePrimary:
     CompilePrim PrimCall
     mov rcx, [rsp + 640]
     call Compile
+.CallEmitted:
     mov rcx, [rsp + 640]
     add rsp, 960
     mov rax, [rcx - 8]
@@ -1229,7 +1270,7 @@ GenericValue:
     mov r12, rcx
     mov r13, [rel CurHintFn]
     test r13, r13
-    jz .NoHint
+    jz .Numbers
     xor ecx, ecx
 .Clear:
     mov qword [rsp + rcx * 8], 0
@@ -1288,6 +1329,7 @@ GenericValue:
     jb .Check
     cmp qword [rel SubstFail], 0
     jne .NoHint
+.Make:
     mov rcx, r12
     mov rdx, rsp
     call GetInstance
@@ -1298,6 +1340,9 @@ GenericValue:
     call Compile
     pop rcx
     pop rcx
+    mov [rel LastFnValSig], rcx
+    mov rax, [rel Here]
+    mov [rel LastFnValHere], rax
     call FuncTypeOfSig
     mov [rel ExprType], rax
     add rsp, 224
@@ -1307,5 +1352,13 @@ GenericValue:
     ret
 .Mismatch:
     Fail ErrArgType
+.Numbers:
+    xor ecx, ecx
+.NumFill:
+    mov qword [rsp + rcx * 8], TNum
+    inc ecx
+    cmp ecx, 27
+    jb .NumFill
+    jmp .Make
 .NoHint:
     Fail ErrGenericValue

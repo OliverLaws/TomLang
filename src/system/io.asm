@@ -1,4 +1,6 @@
 %include "macros.inc"
+extern CbRspPtr
+extern FfiVmPtr
 global InitIO
 global PrintString
 global PrintNumber
@@ -7,7 +9,29 @@ global ReadLine
 global InputBuf
 global LoadFileArg
 global CheckMode
+extern TestMode
 global SysAlloc
+global SysNowNs
+global SysSleepNs
+global SysSleepNsT
+global SysThreadId
+global SysThreadCreate
+global SysThreadExit
+extern CreateThread
+extern ExitThread
+extern GetCurrentThreadId
+extern ThreadMain
+extern ThreadPark
+extern ThreadUnpark
+extern Threaded
+extern CbEnter
+extern CbExit
+extern QueryPerformanceCounter
+extern QueryPerformanceFrequency
+extern CreateWaitableTimerExW
+extern SetWaitableTimer
+extern WaitForSingleObject
+extern Sleep
 global LoadFile
 global ExeDir
 global MainPathPtr
@@ -66,6 +90,9 @@ InputBuf  resb 4096
 PathBuf   resb 1024
 FileBuf   resb 16777216
 CheckMode resq 1
+QpcFreq resq 1
+WaitTimer resq 1
+WaitTimerTried resq 1
 MainPathPtr resq 1
 FileSize resq 1
 
@@ -302,9 +329,14 @@ LoadFileArg:
     jne .NotFlag
     cmp byte [rcx + 1], '-'
     jne .NotFlag
+    cmp byte [rcx + 2], 't'
+    je .TestFlag
     cmp byte [rcx + 2], 'c'
     jne .NotFlag
     mov qword [rel CheckMode], 1
+    jmp .SkipFlag
+.TestFlag:
+    mov qword [rel TestMode], 1
 .SkipFlag:
     mov al, [rcx]
     test al, al
@@ -314,6 +346,14 @@ LoadFileArg:
     inc rcx
     jmp .SkipFlag
 .NotFlag:
+    cmp dword [rcx], 'test'
+    jne .NotTestWord
+    cmp byte [rcx + 4], ' '
+    jne .NotTestWord
+    mov qword [rel TestMode], 1
+    add rcx, 4
+    jmp .SkipSpaces
+.NotTestWord:
     lea rdx, [rel PathBuf]
     mov r8b, ' '
     cmp byte [rcx], '"'
@@ -383,6 +423,125 @@ LoadFileArg:
     call PrintString
     mov ecx, 1
     call ExitProcess
+
+SysNowNs:
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 48
+    cmp qword [rel QpcFreq], 0
+    jne .HaveFreq
+    lea rcx, [rel QpcFreq]
+    call QueryPerformanceFrequency
+.HaveFreq:
+    lea rcx, [rsp + 32]
+    call QueryPerformanceCounter
+    mov rax, [rsp + 32]
+    mov rcx, 1000000000
+    mul rcx
+    div qword [rel QpcFreq]
+    mov rsp, rbp
+    pop rbp
+    ret
+
+SysSleepNs:
+    lea rdx, [rel WaitTimer]
+SysSleepNsT:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    and rsp, -16
+    sub rsp, 64
+    mov rbx, rdx
+    mov [rsp + 56], rcx
+    cmp qword [rbx], 0
+    jne .HaveTimer
+    cmp qword [rel WaitTimerTried], 0
+    jne .Fallback
+    xor ecx, ecx
+    xor edx, edx
+    mov r8d, 2
+    mov r9d, 0x1F0003
+    call CreateWaitableTimerExW
+    mov [rbx], rax
+    test rax, rax
+    jnz .HaveTimer
+    mov qword [rel WaitTimerTried], 1
+    jmp .Fallback
+.HaveTimer:
+    mov rax, [rsp + 56]
+    xor edx, edx
+    mov rcx, 100
+    div rcx
+    neg rax
+    mov [rsp + 48], rax
+    mov rcx, [rbx]
+    lea rdx, [rsp + 48]
+    xor r8d, r8d
+    xor r9d, r9d
+    mov qword [rsp + 32], 0
+    mov qword [rsp + 40], 0
+    call SetWaitableTimer
+    test eax, eax
+    jz .Fallback
+    mov rcx, [rbx]
+    mov edx, -1
+    call WaitForSingleObject
+    jmp .Done
+.Fallback:
+    mov rax, [rsp + 56]
+    xor edx, edx
+    mov rcx, 1000000
+    div rcx
+    mov rcx, rax
+    call Sleep
+.Done:
+    mov rbx, [rbp - 8]
+    mov rsp, rbp
+    pop rbp
+    ret
+
+SysThreadId:
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 32
+    call GetCurrentThreadId
+    mov eax, eax
+    mov rsp, rbp
+    pop rbp
+    ret
+
+SysThreadCreate:
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 64
+    mov r9, rcx
+    xor ecx, ecx
+    mov edx, 1048576
+    lea r8, [rel ThreadStub]
+    mov qword [rsp + 32], 0
+    mov qword [rsp + 40], 0
+    call CreateThread
+    test rax, rax
+    jz .Out
+    mov rcx, rax
+    call CloseHandle
+    mov eax, 1
+.Out:
+    mov rsp, rbp
+    pop rbp
+    ret
+
+ThreadStub:
+    jmp ThreadMain
+
+SysThreadExit:
+    and rsp, -16
+    sub rsp, 32
+    xor ecx, ecx
+    call ExitThread
 
 SysAlloc:
     push rbp
@@ -511,7 +670,7 @@ PrimFfiCall:
     cmp rax, 256
     jae .NoVm
     imul rax, rax, 24
-    lea rcx, [rel FfiVmStack]
+    mov rcx, [rel FfiVmPtr]
     mov [rcx + rax], r15
     mov [rcx + rax + 8], rbp
     mov [rcx + rax + 16], r13
@@ -540,6 +699,12 @@ PrimFfiCall:
     inc rcx
     jmp .Store
 .Load:
+    xor esi, esi
+    cmp qword [rel Threaded], 0
+    je .Go
+    call ThreadPark
+    mov rsi, rax
+.Go:
     mov r10, [r14 - 32]
     mov rcx, [rsp]
     mov rdx, [rsp + 8]
@@ -551,6 +716,17 @@ PrimFfiCall:
     movq xmm3, r9
     call r10
     mov rsp, rbx
+    test rsi, rsi
+    jz .Back
+    push rax
+    sub rsp, 8
+    movq [rsp], xmm0
+    mov rcx, rsi
+    call ThreadUnpark
+    movq xmm0, [rsp]
+    add rsp, 8
+    pop rax
+.Back:
     dec qword [rel FfiVmDepth]
     jmp FfiFinish
 
@@ -600,12 +776,16 @@ CallbackEntry:
     mov [rsp + 224], r11
     mov [rsp + 232], rax
     mov r12, rax
+    call CbEnter
+    mov [rsp + 240], rax
+    cmp rax, -1
+    je .NoVm
     mov rax, [rel FfiVmDepth]
     test rax, rax
     jz .NoVm
     dec rax
     imul rax, rax, 24
-    lea rcx, [rel FfiVmStack]
+    mov rcx, [rel FfiVmPtr]
     mov r15, [rcx + rax]
     mov rbp, [rcx + rax + 8]
     mov r13, [rcx + rax + 16]
@@ -640,7 +820,7 @@ CallbackEntry:
     mov rax, [rel CbDepth]
     cmp rax, 256
     jae .NoVm
-    lea rcx, [rel CbRspStack]
+    mov rcx, [rel CbRspPtr]
     mov [rcx + rax * 8], rsp
     inc qword [rel CbDepth]
     lea r14, [r12 + 16]
@@ -652,7 +832,7 @@ CallbackEntry:
 PrimCallbackDone:
     dec qword [rel CbDepth]
     mov rax, [rel CbDepth]
-    lea rcx, [rel CbRspStack]
+    mov rcx, [rel CbRspPtr]
     mov rsp, [rcx + rax * 8]
     mov r12, [rsp + 232]
     mov rbx, [r12 + 8]
@@ -663,6 +843,8 @@ PrimCallbackDone:
     DPop rax
     call CallbackResult
 CallbackReturn:
+    mov rcx, [rsp + 240]
+    call CbExit
     movdqu xmm6, [rsp]
     movdqu xmm7, [rsp + 16]
     movdqu xmm8, [rsp + 32]

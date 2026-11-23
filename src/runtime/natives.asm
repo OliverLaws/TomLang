@@ -28,6 +28,8 @@ extern Here
 extern DictHere
 extern Latest
 extern Alloc
+extern AllocAtomic
+extern Threaded
 extern PermAlloc
 extern MakeTextFrom
 extern PrimExit
@@ -506,6 +508,21 @@ StructToC:
     mov r10, [r8 + 8]
     add r10, r13
     mov r11, [r8]
+    mov r9, [r8 + 24]
+    push rcx
+    push r8
+    call PutOne
+    pop r8
+    pop rcx
+    inc rcx
+    jmp .Field
+.Done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+PutOne:
     cmp r11, 1
     je .Byte
     cmp r11, 8
@@ -520,37 +537,101 @@ StructToC:
     je .Float
     cmp r11, 9
     je .Nested
+    cmp r11, 10
+    je .Chars
+    cmp r11, 11
+    je .Array
     mov [r10], rax
-    jmp .Next
+    ret
 .Byte:
     mov [r10], al
-    jmp .Next
+    ret
 .Bool:
     test rax, rax
     setnz byte [r10]
-    jmp .Next
+    ret
 .Short:
     mov [r10], ax
-    jmp .Next
+    ret
 .Int:
     mov [r10], eax
-    jmp .Next
+    ret
 .Float:
     movq xmm0, rax
     cvtsd2ss xmm0, xmm0
     movd [r10], xmm0
-    jmp .Next
+    ret
 .Nested:
-    push rcx
+    push rsi
+    push rdi
     mov rsi, rax
     mov rdi, r10
-    mov rdx, [r8 + 24]
+    mov rdx, r9
     call StructToC
+    pop rdi
+    pop rsi
+    ret
+.Chars:
+    push rsi
+    push rdi
+    mov rdi, r10
+    mov rcx, r9
+    push rax
+    xor eax, eax
+    rep stosb
+    pop rsi
+    mov rcx, [rsi]
+    lea rdx, [r9 - 1]
+    cmp rcx, rdx
+    jbe .CharsFit
+    mov rcx, rdx
+.CharsFit:
+    add rsi, 8
+    mov rdi, r10
+    rep movsb
+    pop rdi
+    pop rsi
+    ret
+.Array:
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov rbx, r9
+    mov r12, rax
+    mov r13, r10
+    mov rcx, [rbx + 8]
+    imul rcx, [rbx + 16]
+    push rdi
+    mov rdi, r10
+    xor eax, eax
+    rep stosb
+    pop rdi
+    mov r14, [r12]
+    cmp r14, [rbx + 8]
+    jbe .Count
+    mov r14, [rbx + 8]
+.Count:
+    xor ecx, ecx
+.Elem:
+    cmp rcx, r14
+    jae .ArrayDone
+    mov rax, [r12 + 16]
+    mov rax, [rax + rcx * 8]
+    mov r10, rcx
+    imul r10, [rbx + 16]
+    add r10, r13
+    mov r11, [rbx]
+    mov r9, [rbx + 24]
+    push rcx
+    push rcx
+    call PutOne
     pop rcx
-.Next:
+    pop rcx
     inc rcx
-    jmp .Field
-.Done:
+    jmp .Elem
+.ArrayDone:
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -562,12 +643,14 @@ StructFromC:
     push r13
     mov r12, rsi
     mov rbx, rdx
+    DPush rsi
     mov rcx, [rbx + 24]
     shl rcx, 3
     push rcx
     call Alloc
     pop rcx
     mov r13, rax
+    DPush rax
     xor ecx, ecx
 .Field:
     cmp rcx, [rbx + 24]
@@ -578,6 +661,25 @@ StructFromC:
     mov r10, [r8 + 8]
     add r10, r12
     mov r11, [r8]
+    mov r9, [r8 + 24]
+    push rcx
+    push r8
+    call GetOne
+    pop r8
+    pop rcx
+    mov r9, [r8 + 16]
+    mov [r13 + r9 * 8], rax
+    inc rcx
+    jmp .Field
+.Done:
+    sub r15, 16
+    mov rax, r13
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+GetOne:
     cmp r11, 1
     je .Byte
     cmp r11, 8
@@ -592,44 +694,92 @@ StructFromC:
     je .Float
     cmp r11, 9
     je .Nested
+    cmp r11, 10
+    je .Chars
+    cmp r11, 11
+    je .Array
     mov rax, [r10]
-    jmp .Store
+    ret
 .Byte:
     movzx eax, byte [r10]
-    jmp .Store
+    ret
 .Bool:
     movzx eax, byte [r10]
     test eax, eax
     setnz al
-    jmp .Store
+    ret
 .Short:
     movsx rax, word [r10]
-    jmp .Store
+    ret
 .Int:
     movsxd rax, dword [r10]
-    jmp .Store
+    ret
 .UInt:
     mov eax, [r10]
-    jmp .Store
+    ret
 .Float:
     cvtss2sd xmm0, [r10]
     movq rax, xmm0
-    jmp .Store
+    ret
 .Nested:
-    push rcx
-    push r8
+    push rsi
     mov rsi, r10
-    mov rdx, [r8 + 24]
+    mov rdx, r9
     call StructFromC
-    pop r8
-    pop rcx
-.Store:
-    mov r9, [r8 + 16]
-    mov [r13 + r9 * 8], rax
-    inc rcx
-    jmp .Field
-.Done:
+    pop rsi
+    ret
+.Chars:
+    xor edx, edx
+.Scan:
+    cmp rdx, r9
+    jae .Make
+    cmp byte [r10 + rdx], 0
+    je .Make
+    inc rdx
+    jmp .Scan
+.Make:
+    mov rcx, r10
+    jmp MakeTextFrom
+.Array:
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov rbx, r9
+    mov r12, r10
+    DPush r10
+    mov ecx, 24
+    call Alloc
+    mov r13, rax
+    DPush rax
+    mov rcx, [rbx + 8]
+    mov [r13], rcx
+    cmp rcx, 4
+    jae .Cap
+    mov ecx, 4
+.Cap:
+    mov [r13 + 8], rcx
+    shl rcx, 3
+    call Alloc
+    mov [r13 + 16], rax
+    xor r14d, r14d
+.Elem:
+    cmp r14, [rbx + 8]
+    jae .ArrayDone
+    mov r10, r14
+    imul r10, [rbx + 16]
+    add r10, r12
+    mov r11, [rbx]
+    mov r9, [rbx + 24]
+    call GetOne
+    mov rdx, [r13 + 16]
+    mov [rdx + r14 * 8], rax
+    inc r14
+    jmp .Elem
+.ArrayDone:
+    sub r15, 16
     mov rax, r13
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -674,7 +824,7 @@ FfiPrepare:
     mov rdx, [r14 - 8]
     mov rcx, [rdx + 8]
     push r11
-    call Alloc
+    call AllocAtomic
     pop r11
     mov [rel FfiHidden], rax
     lea rcx, [rel FfiArgs]
@@ -715,7 +865,7 @@ FfiPrepare:
     mov rcx, [rsi]
     inc rcx
     push rsi
-    call Alloc
+    call AllocAtomic
     pop rsi
     mov rdi, rax
     mov rcx, [rsi]
@@ -891,6 +1041,7 @@ MakeThunk:
 .New:
     cmp qword [rel ThunkCount], 256
     jae .Full
+    mov qword [rel Threaded], 1
     push rcx
     push rdx
     cmp qword [rel ThunkMem], 0

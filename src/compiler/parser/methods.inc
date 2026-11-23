@@ -1688,6 +1688,15 @@ FolderText:
     jae .Dot
     test r12, r12
     jz .Abs
+    xor ecx, ecx
+.Slash:
+    cmp byte [rbx + rcx], 92
+    jne .NextSlash
+    mov byte [rbx + rcx], '/'
+.NextSlash:
+    inc rcx
+    cmp rcx, r12
+    jb .Slash
     mov byte [rbx + r12], '/'
     inc r12
 .Abs:

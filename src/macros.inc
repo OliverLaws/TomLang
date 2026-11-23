@@ -1,3 +1,4 @@
+%define LetterCacheQ 512
 %macro DPush 1
     mov qword [r15], %1
     add r15, 8
@@ -26,7 +27,7 @@
 
 %macro CompilePrim 1
     lea rcx, [rel %1]
-    call Compile
+    call CompileOp
 %endmacro
 
 %xdefine LastEntry 0

@@ -109,8 +109,25 @@ OtherwiseWord:
     test eax, eax
     jz Pushback
     call Advance
+    mov qword [rel NarrowCandVar], 0
+    mov qword [rel NegCandVar], 0
+    mov qword [rel NegCount], 0
+    mov qword [rel AndSeen], 0
+    mov qword [rel OrSeen], 0
     call ParseExpr
     call NeedCondition
+    mov rax, [rel NarrowCandHere]
+    cmp rax, [rel Here]
+    jne .ElseNoNarrow
+    cmp qword [rel OrSeen], 0
+    jne .ElseNoNarrow
+    mov rcx, [rel NarrowCandVar]
+    test rcx, rcx
+    jz .ElseNoNarrow
+    mov rdx, [rel NarrowCandType]
+    call NarrowPush
+.ElseNoNarrow:
+    mov qword [rel NegCount], 0
     lea rcx, [rel PrimBranch0]
     call EmitJump
     mov [r15 - 32], rax
@@ -249,7 +266,7 @@ EndWord:
     mov rcx, rbx
     call EmitStore
 .NoCounter:
-    CompilePrim PrimBranch
+    CompilePrim PrimLoopBack
     mov rcx, [r15 - 40]
     call Compile
     mov rcx, [r15 - 32]
@@ -552,8 +569,11 @@ RepeatWord:
     jne .MapValue
     mov rcx, [rsp + 32]
     call EmitLoad
+    call FileZero
+    jnz .IdxZero
     CompileNum 1
     CompilePrim PrimAdd
+.IdxZero:
     pop rcx
     call EmitStore
     jmp .NoIdx
@@ -688,6 +708,24 @@ EndTries:
 StopWord:
     mov ecx, TagLoop
     call EndTries
+    mov rcx, [rel OpenBlocks]
+    mov rax, r15
+.TaskScan:
+    test rcx, rcx
+    jz .Loop
+    cmp qword [rax - 8], TagLoop
+    je .Loop
+    cmp qword [rax - 8], TagFn
+    je .FnFrame
+    sub rax, 40
+    dec rcx
+    jmp .TaskScan
+.FnFrame:
+    cmp qword [rax - 16], 1
+    jne .Loop
+    CompilePrim PrimTaskEnd
+    ret
+.Loop:
     call FindLoopFrame
     mov r11, rax
     lea rcx, [rel PrimBranch]
