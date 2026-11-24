@@ -1,0 +1,9 @@
+build/
+*.exe
+*.obj
+
+tempCodeRunnerFile.tom
+tests/
+
+DOCS.md
+TODO.md
