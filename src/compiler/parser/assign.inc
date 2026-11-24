@@ -255,7 +255,9 @@ SetWord:
     IfTok "[", .Existing
     IfTok ".", .Existing
     mov rcx, [rsp + 8]
+    mov [rel SetHintPtr], rcx
     mov rdx, [rsp]
+    mov [rel SetHintLen], rdx
     cmp qword [rel InFn], 0
     jne .InFunction
     call LookupVar
@@ -361,6 +363,10 @@ SetWord:
     Fail ErrKeepExists
 
 AssignTail:
+    cmp qword [rel HintMode], 0
+    je .NoHint
+    call HintEnter
+.NoHint:
     mov rax, [rel ReplacePtr]
     mov [rel CurReplacePtr], rax
     mov rax, [rel ReplaceLen]
@@ -645,6 +651,10 @@ AssignTail:
     call ToTextRaw
     CompilePrim PrimConcat
 .Store:
+    cmp qword [rel HintMode], 0
+    je .StoreNoHint
+    call HintStore
+.StoreNoHint:
     mov rcx, [rsp]
     call MarkNumberList
     pop rcx
@@ -1262,3 +1272,82 @@ SettingWord:
 .Done:
     call Advance
     jmp Pushback
+
+HintEnter:
+    push rax
+    push r8
+    push r9
+    push r10
+    lea r8, [rsp + 40]
+    lea r10, [rel HintStack]
+    mov r9, [rel HintTop]
+.Drop:
+    test r9, r9
+    jz .Push
+    lea rax, [r9 + r9 * 2 - 3]
+    cmp [r10 + rax * 8], r8
+    ja .Push
+    dec r9
+    jmp .Drop
+.Push:
+    mov rax, [rel SetHintLen]
+    mov qword [rel SetHintLen], 0
+    test rax, rax
+    jz .Done
+    cmp r9, 32
+    jae .Done
+    push r9
+    lea r9, [r9 + r9 * 2]
+    lea r9, [r10 + r9 * 8]
+    mov [r9], r8
+    mov [r9 + 16], rax
+    mov rax, [rel SetHintPtr]
+    mov [r9 + 8], rax
+    pop r9
+    inc r9
+.Done:
+    mov [rel HintTop], r9
+    pop r10
+    pop r9
+    pop r8
+    pop rax
+    ret
+
+HintStore:
+    push rax
+    push rcx
+    push rdx
+    push r8
+    push r9
+    push r10
+    push r11
+    mov r9, [rel HintTop]
+    test r9, r9
+    jz .Done
+    lea r10, [rel HintStack]
+    lea rax, [r9 + r9 * 2 - 3]
+    lea r10, [r10 + rax * 8]
+    lea rax, [rsp + 64]
+    cmp [r10], rax
+    jne .Done
+    dec qword [rel HintTop]
+    push r10
+    push r10
+    mov rcx, [rax]
+    call TypeOf
+    pop r10
+    pop r10
+    mov r8, rax
+    mov rcx, [r10 + 8]
+    mov rdx, [r10 + 16]
+    mov r9, rcx
+    call Hint
+.Done:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    pop rax
+    ret

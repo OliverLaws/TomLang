@@ -1,0 +1,33 @@
+use files
+use os
+use "doccore" as core
+
+set args = os.arguments()
+if args.length == 0
+    say "tomlang doc mylib.tom           make mylib.md from its ## doc comments"
+    say "tomlang doc --force mylib.tom   also replace a mylib.md you wrote by hand"
+    bye
+end
+
+set force = false
+repeat each arg in args
+    if arg == "--force"
+        force = true
+        skip
+    end
+    set full = arg if files.isAbsolutePath(arg) otherwise files.joinPath([files.workingFolder(), arg])
+    if not files.fileExists(full)
+        say "can't find {arg}"
+        skip
+    end
+    set name = files.fileNameWithoutExtension(full)
+    set page = files.replaceExtension(full, ".md")
+    if files.fileExists(page) and not force
+        if not files.readFile(page).startsWith("<!-- made by tomlang doc -->")
+            say "{page} was written by hand, so it was left alone (add --force to replace it)"
+            skip
+        end
+    end
+    files.writeFile(page, core.docPage(name, files.readFile(full)))
+    say "made {page}"
+end

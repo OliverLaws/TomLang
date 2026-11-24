@@ -949,6 +949,7 @@ ParsePrimary:
 
 .Unknown:
     IfTok "here", .Here
+    IfTok "builtExe", .BuiltExe
     IfTok "mainFolder", .MainFolder
     cmp qword [rel PreScanActive], MaxPre
     jae .NoForward
@@ -1002,6 +1003,10 @@ ParsePrimary:
     FailTok ErrNotExist
 .Captured:
     FailTok ErrCapture
+.BuiltExe:
+    CompileNum [rel Packed]
+    SetType TBool
+    jmp Advance
 .Here:
     mov rcx, [rel CurFile]
     jmp .Folder

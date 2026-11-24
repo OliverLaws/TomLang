@@ -1,0 +1,93 @@
+use "fmtcore" as fmt
+
+record Entry = section: text, signature: text, about: text
+
+do _cell(value: text): text
+    return value.replace("|", "\\|").replace("\n", " ")
+end
+
+do _signature(line: text, word: text): text
+    set rest = line.trim()[word.length + 1 .. line.trim().length].trim()
+    if rest.endsWith(" end")
+        rest = rest[1 .. rest.length - 4].trim()
+    end
+    return rest
+end
+
+## Makes a markdown page from a files doc comments: functions, records, kinds and constants that arent private (no _)
+do docPage(name: text, source: text): text
+    set lines = source.replace("\r\n", "\n").split("\n")
+    set depths = fmt.lineDepths(source)
+    set intro: list of text = []
+    set entries: list of Entry = []
+    set pending: list of text = []
+    set started = false
+    repeat each i, line in lines
+        set t = line.trim()
+        if depths[i] != 0
+            pending = []
+            skip
+        end
+        if t.startsWith("##") and not t.startsWith("###")
+            set piece = t[3 .. t.length].trim() if t.length > 2 otherwise ""
+            pending.add(piece)
+            skip
+        end
+        if t == ""
+            if not started and pending.length > 0
+                repeat each p in pending
+                    intro.add(p)
+                end
+                intro.add("")
+            end
+            pending = []
+            skip
+        end
+        set words = t.split(" ").filter(w => w != "")
+        set first = words[1]
+        set about = pending.join(" ")
+        pending = []
+        if first == "use" or first == "dll" or first == "setting" or t.startsWith("#")
+            skip
+        end
+        started = true
+        if words.length < 2 or words[2].startsWith("_")
+            skip
+        end
+        if first == "do"
+            entries.add(Entry("Functions", _signature(t, "do"), about))
+        otherwise if first == "record" or first == "interface"
+            entries.add(Entry("Records", t, about))
+        otherwise if first == "kind" or first == "type"
+            entries.add(Entry("Kinds and types", t, about))
+        otherwise if first == "keep"
+            entries.add(Entry("Constants", _signature(t, "keep"), about))
+        end
+    end
+    set out: list of text = []
+    out.add("<!-- made by tomlang doc -->")
+    out.add("# {name}")
+    out.add("")
+    out.add("```")
+    out.add("use {name}")
+    out.add("```")
+    out.add("")
+    repeat each line in intro
+        out.add(line)
+    end
+    repeat each section in ["Functions", "Records", "Kinds and types", "Constants"]
+        set rows = entries.filter(e => e.section == section)
+        if rows.length == 0
+            skip
+        end
+        out.add("## {section}")
+        out.add("")
+        out.add("| | |")
+        out.add("|---|---|")
+        repeat each e in rows
+            out.add("| `{_cell(e.signature)}` | {_cell(e.about)} |")
+        end
+        out.add("")
+    end
+    return out.join("\n")
+end

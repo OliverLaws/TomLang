@@ -1,0 +1,258 @@
+record Scan = code: text, brackets: number, closersAtStart: number
+record Block = kind: text, start: number, finish: number, inCase: bool
+
+set _inString = false
+set _inComment = false
+
+do _scan(line: text): Scan
+    set code: list of text = []
+    set brackets = 0
+    set closers = 0
+    set seen = false
+    set i = 1
+    set n = line.length
+    repeat while i <= n
+        set c = line[i]
+        if _inComment
+            if c == "]" and i < n and line[i + 1] == "#"
+                _inComment = false
+                i += 1
+            end
+        otherwise if _inString
+            if c == "\\"
+                i += 1
+            otherwise if c == "\""
+                _inString = false
+            end
+            code.add(" ")
+        otherwise if c == "#"
+            if i < n and line[i + 1] == "["
+                _inComment = true
+                i += 1
+            otherwise
+                stop
+            end
+        otherwise if c == "\""
+            _inString = true
+            code.add(" ")
+            seen = true
+        otherwise
+            if c == "(" or c == "[" or c == "\{"
+                brackets += 1
+                seen = true
+            otherwise if c == ")" or c == "]" or c == "\}"
+                brackets -= 1
+                if not seen
+                    closers += 1
+                end
+            otherwise if c != " " and c != "\t"
+                seen = true
+            end
+            code.add(c)
+        end
+        i += 1
+    end
+    return Scan(code.join(), brackets, closers)
+end
+
+do _words(code: text): list of text
+    return code.trim().replace("\t", " ").split(" ").filter(w => w != "")
+end
+
+do _isWordChar(c: text): bool
+    set k = charCode(c)
+    return (k >= 48 and k <= 57) or (k >= 65 and k <= 90) or (k >= 97 and k <= 122) or k == 95
+end
+
+do _role(code: text, top: text, raw: text): text
+    set words = _words(code)
+    if words.length == 0
+        return ""
+    end
+    set w = words[1]
+    if w == "end"
+        return "close"
+    end
+    if w == "otherwise"
+        return "middle"
+    end
+    if w == "is" and top == "check"
+        return "middle"
+    end
+    set t = code.trim()
+    if words.length > 1 and t.endsWith("end")
+        if t.length == 3 or not _isWordChar(t[t.length - 3])
+            return ""
+        end
+    end
+    if w == "if" or w == "repeat" or w == "try" or w == "check" or w == "dll"
+        return "open"
+    end
+    if w == "do" and top != "dll"
+        return "open"
+    end
+    if w == "test"
+        set rest = raw.trim()
+        if rest.length > 4 and rest[5..rest.length].trim().startsWith("\"")
+            return "open"
+        end
+        return ""
+    end
+    if (w == "every" or w == "after" or w == "when") and words.length > 1
+        if not words[2].startsWith("=") and not words[2].startsWith("(")
+            return "open"
+        end
+        return ""
+    end
+    if (w == "task" or w == "thread" or w == "later") and words.length == 1
+        return "open"
+    end
+    if (w == "record" or w == "interface") and words.length == 2
+        return "open"
+    end
+    return ""
+end
+
+do _level(stack: list of Block): number
+    set total = 0
+    repeat each b in stack
+        total += 2 if b.inCase otherwise 1
+    end
+    return total
+end
+
+do _indent(level: number): text
+    set out = ""
+    repeat level times
+        out += "    "
+    end
+    return out
+end
+
+do _trimStart(line: text): text
+    set i = 1
+    repeat while i <= line.length and (line[i] == " " or line[i] == "\t")
+        i += 1
+    end
+    if i > line.length
+        return ""
+    end
+    return line[i..line.length]
+end
+
+do _trimEnd(line: text): text
+    set i = line.length
+    repeat while i >= 1 and (line[i] == " " or line[i] == "\t")
+        i -= 1
+    end
+    if i < 1
+        return ""
+    end
+    return line[1..i]
+end
+
+## Gives back the tidied text, or nothing for files that rename keywords with setting.
+do formatText(source: text): text?
+    set crlf = source.contains("\r\n")
+    set lines = source.replace("\r\n", "\n").split("\n")
+    repeat each line in lines
+        set t = line.trim()
+        if t.startsWith("setting ") and t.contains(" word")
+            return nothing
+        end
+    end
+    _inString = false
+    _inComment = false
+    set stack: list of Block = []
+    set out: list of text = []
+    set brackets = 0
+    set blanks = 0
+    repeat each line in lines
+        set inString = _inString
+        set inComment = _inComment
+        set scan = _scan(line)
+        set top = stack[stack.length].kind if stack.length > 0 otherwise ""
+        set role = ""
+        if not inString and not inComment and brackets == 0
+            role = _role(scan.code, top, line)
+        end
+        set depth = _level(stack)
+        if role == "close"
+            if stack.length > 0
+                stack.pop()
+            end
+            depth = _level(stack)
+        otherwise if role == "middle"
+            if top == "check"
+                stack[stack.length].inCase = true
+            end
+            depth = _level(stack) - 1
+            if depth < 0
+                depth = 0
+            end
+        otherwise if role == "open"
+            stack.add(Block(_words(scan.code)[1], 0, 0, false))
+        end
+        set extra = brackets - scan.closersAtStart
+        if extra < 0
+            extra = 0
+        end
+        brackets += scan.brackets
+        if brackets < 0
+            brackets = 0
+        end
+        if inString or inComment
+            out.add(line)
+            blanks = 0
+        otherwise if line.trim() == ""
+            blanks += 1
+            if blanks <= 2 and out.length > 0
+                out.add("")
+            end
+        otherwise
+            blanks = 0
+            out.add(_indent(depth + extra) + _trimEnd(_trimStart(line)))
+        end
+    end
+    repeat while out.length > 0 and out[out.length] == ""
+        out.pop()
+    end
+    set eol = "\r\n" if crlf otherwise "\n"
+    return out.join(eol) + eol
+end
+
+## Gives back each line's block depth: 0 at the top of the file, -1 inside text or a #[ ]# comment.
+do lineDepths(source: text): list of number
+    set lines = source.replace("\r\n", "\n").split("\n")
+    _inString = false
+    _inComment = false
+    set stack: list of Block = []
+    set depths: list of number = []
+    set brackets = 0
+    repeat each line in lines
+        set inString = _inString
+        set inComment = _inComment
+        set scan = _scan(line)
+        set top = stack[stack.length].kind if stack.length > 0 otherwise ""
+        set role = ""
+        if not inString and not inComment and brackets == 0
+            role = _role(scan.code, top, line)
+        end
+        set depth = stack.length
+        if role == "close" and stack.length > 0
+            stack.pop()
+            depth = stack.length
+        otherwise if role == "open"
+            stack.add(Block(_words(scan.code)[1], 0, 0, false))
+        end
+        if inString or inComment or brackets > 0
+            depth = -1
+        end
+        depths.add(depth)
+        brackets += scan.brackets
+        if brackets < 0
+            brackets = 0
+        end
+    end
+    return depths
+end

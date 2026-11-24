@@ -12,6 +12,8 @@ global DropFn
 global MakingConst
 global InFn
 extern Warn
+extern Hint
+extern HintMode
 global StmtExpr
 global TokPtr
 global TokLen
@@ -90,6 +92,7 @@ extern PrimLocalSet
 extern PrimBranch
 extern PrimLoopBack
 extern PrimNoPtrs
+extern Packed
 extern PrimAppendG
 extern PrimAppendL
 extern PrimFlatTop
@@ -461,6 +464,10 @@ ForwardRegion equ 8
 MaxPre equ 16
 
 section .bss
+SetHintPtr resq 1
+SetHintLen resq 1
+HintTop resq 1
+HintStack resq 96
 ParserState:
 AllowTypeVars resq 1
 GenericFound resq 1

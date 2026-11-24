@@ -11,6 +11,7 @@ Hovering over a library function in VS Code shows its description from these pag
 | [strings](strings.md) | padding, counting, wrapping, titles and other text helpers (split, upper and trim are built in) | done |
 | [files](files.md) | reading, writing, checking and organising files and folders | done |
 | [time](time.md) | clocks, timing, sleeping, dates and formatting | done |
-| [os](os.md) | environment variables, arguments, running programs, system info, clipboard | done |
+| [os](os.md) | environment variables, arguments, running programs, system info, clipboard, notifications | done |
+| [http](http.md) | downloading pages, calling APIs, JSON, forms, uploads, downloads to files | done |
 | [json](json.md) | reading, writing and picking through JSON | done |
 | [channels](channels.md) | passing values between tasks and threads (send, receive) | done |

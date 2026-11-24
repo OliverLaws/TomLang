@@ -67,3 +67,21 @@ Plain text only; letters outside English (é, emoji) may not come through correc
 |---|---|
 | `copyToClipboard(content: text)` | puts text on the clipboard, like Ctrl+C |
 | `readClipboard(): text` | what's on the clipboard, or `""` if it isn't text |
+
+## Notifications
+
+A pop-up in the corner of the screen (and in Windows' notification list), with sound.
+
+```
+os.notify("Build finished", "game.exe is ready")
+os.notify("Low health", "drink a potion", "warning", seconds: 10, sound: false)
+```
+
+| Function | Does |
+|---|---|
+| `notify(title: text, message: text, icon: text = "", seconds: decimal = 5, sound: bool = true)` | shows it and carries straight on; the tray icon goes away after `seconds` |
+| `notifyAndWait(title: text, message: text, icon: text = "", seconds: decimal = 5, sound: bool = true)` | the same, but waits the `seconds` before carrying on |
+
+- `icon` is `""` or `"app"` (the program's own icon), `"info"`, `"warning"`, `"error"`, `"none"`, or the path of a `.ico` file (if it can't be loaded, the app icon is used).
+- Titles over 63 bytes and messages over 255 bytes are cut short.
+- `notify` runs on its own thread, so a program that ends straight after waits until the notification is done.

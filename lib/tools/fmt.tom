@@ -1,0 +1,53 @@
+use files
+use os
+use "fmtcore" as core
+
+set args = os.arguments()
+if args.length == 0
+    say "tomlang fmt game.tom      tidy one file"
+    say "tomlang fmt src           tidy every .tom file in a folder"
+    say "tomlang fmt --check src   only list the files that need tidying"
+    bye
+end
+
+set checkOnly = false
+set targets: list of text = []
+repeat each arg in args
+    if arg == "--check"
+        checkOnly = true
+        skip
+    end
+    set full = arg if files.isAbsolutePath(arg) otherwise files.joinPath([files.workingFolder(), arg])
+    if files.folderExists(full)
+        repeat each found in files.listAllFilesRecursive(full)
+            if found.endsWith(".tom") and not files.fileName(found).startsWith(".")
+                targets.add(found)
+            end
+        end
+    otherwise if files.fileExists(full)
+        targets.add(full)
+    otherwise
+        say "can't find {arg}"
+    end
+end
+
+set changed = 0
+repeat each target in targets
+    set source = files.readFile(target)
+    set result = core.formatText(source)
+    if result is nothing
+        say "left as it is (renames keywords): {target}"
+    otherwise if result != source
+        changed += 1
+        if checkOnly
+            say "needs tidying: {target}"
+        otherwise
+            files.writeFile(target, result)
+            say "tidied {target}"
+        end
+    end
+end
+
+if changed == 0
+    say "everything is already tidy"
+end

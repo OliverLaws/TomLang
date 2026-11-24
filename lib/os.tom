@@ -23,6 +23,7 @@ dll "kernel32"
     do _globalAlloc(flags: uint, size: number): number as "GlobalAlloc"
     do _globalLock(memory: number): number as "GlobalLock"
     do _globalUnlock(memory: number): bool as "GlobalUnlock"
+    do _sleep(milliseconds: uint) as "Sleep"
 end
 
 dll "advapi32"
@@ -31,6 +32,7 @@ end
 
 dll "shell32"
     do _shellExecute(window: number, action: text, file: text, parameters: number, folder: number, show: int): number as "ShellExecuteA"
+    do _notifyIcon(message: uint, data: number): bool as "Shell_NotifyIconA"
 end
 
 dll "user32"
@@ -39,6 +41,11 @@ dll "user32"
     do _emptyClipboard(): bool as "EmptyClipboard"
     do _setClipboard(format: uint, data: number): number as "SetClipboardData"
     do _getClipboard(format: uint): number as "GetClipboardData"
+    do _createWindow(exStyle: uint, className: text, title: text, style: uint, x: int, y: int, width: int, height: int, parent: number, menu: number, instance: number, param: number): number as "CreateWindowExA"
+    do _destroyWindow(window: number): bool as "DestroyWindow"
+    do _loadIcon(instance: number, name: number): number as "LoadIconA"
+    do _loadImage(instance: number, name: text, imageType: uint, width: int, height: int, flags: uint): number as "LoadImageA"
+    do _destroyIcon(icon: number): bool as "DestroyIcon"
 end
 
 # Records
@@ -54,6 +61,20 @@ keep _UseStdHandles = 256
 keep _StartupInfoSize = 104
 keep _ProcessInfoSize = 24
 keep _PlainText = 1
+keep _NotifyAdd = 0
+keep _NotifyDelete = 2
+keep _NotifyIconSize = 528
+keep _NotifyFlags = 22
+keep _NotifyInfoIcon = 1
+keep _NotifyWarningIcon = 2
+keep _NotifyErrorIcon = 3
+keep _NotifyUserIcon = 36
+keep _NotifyNoSound = 16
+keep _IconError = 32513
+keep _IconWarning = 32515
+keep _IconInfo = 32516
+keep _ImageIcon = 1
+keep _LoadFromFileDefaultSize = 80
 
 do _splitCommandLine(line: text): list of text
     set words: list of text = []
@@ -142,7 +163,7 @@ end
 do arguments(): list of text
     set words = _splitCommandLine(commandLine())
     set out: list of text = []
-    repeat i from 3 to words.length
+    repeat i from (2 if builtExe otherwise 3) to words.length
         out.add(words[i])
     end
     return out
@@ -340,4 +361,96 @@ do readClipboard(): text
     set content = readText(place)
     _globalUnlock(handle)
     return content
+end
+
+do _fitBytes(source: text, limit: number): text
+    set out = source
+    if out.length > limit
+        out = out[1..limit]
+    end
+    repeat forever
+        if byteLength(out) <= limit
+            stop
+        end
+        out = out[1..out.length - 1]
+    end
+    return out
+end
+
+do _showNotification(title: text, message: text, icon: text, seconds: decimal, sound: bool)
+    set window = _createWindow(0, "STATIC", "", 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    if window == 0
+        return
+    end
+    later _destroyWindow(window)
+
+    set iconHandle = 0
+    set infoFlags = _NotifyInfoIcon
+    set ownIcon = 0
+    if icon == "" or icon == "app"
+        ownIcon = _loadImage(0, executablePath(), _ImageIcon, 0, 0, _LoadFromFileDefaultSize)
+        if ownIcon != 0
+            iconHandle = ownIcon
+            infoFlags = _NotifyUserIcon
+        otherwise
+            iconHandle = _loadIcon(0, _IconInfo)
+        end
+    otherwise if icon == "info"
+        iconHandle = _loadIcon(0, _IconInfo)
+    otherwise if icon == "warning"
+        iconHandle = _loadIcon(0, _IconWarning)
+        infoFlags = _NotifyWarningIcon
+    otherwise if icon == "error"
+        iconHandle = _loadIcon(0, _IconError)
+        infoFlags = _NotifyErrorIcon
+    otherwise if icon == "none"
+        iconHandle = _loadIcon(0, _IconInfo)
+        infoFlags = 0
+    otherwise
+        ownIcon = _loadImage(0, icon, _ImageIcon, 0, 0, _LoadFromFileDefaultSize)
+        if ownIcon == 0
+            ownIcon = _loadImage(0, executablePath(), _ImageIcon, 0, 0, _LoadFromFileDefaultSize)
+        end
+        if ownIcon != 0
+            iconHandle = ownIcon
+            infoFlags = _NotifyUserIcon
+        otherwise
+            iconHandle = _loadIcon(0, _IconInfo)
+        end
+    end
+    if ownIcon != 0
+        later _destroyIcon(ownIcon)
+    end
+    if not sound
+        infoFlags = infoFlags | _NotifyNoSound
+    end
+
+    set data = memory(_NotifyIconSize)
+    later freeMemory(data)
+    write32(data, _NotifyIconSize)
+    write64(data + 8, window)
+    write32(data + 16, 1)
+    write32(data + 20, _NotifyFlags)
+    write64(data + 32, iconHandle)
+    writeText(data + 40, _fitBytes(title, 127))
+    writeText(data + 176, _fitBytes(message, 255))
+    writeText(data + 436, _fitBytes(title, 63))
+    write32(data + 500, infoFlags)
+    write64(data + 520, iconHandle)
+
+    if not _notifyIcon(_NotifyAdd, data)
+        return
+    end
+    wait seconds
+    _notifyIcon(_NotifyDelete, data)
+end
+
+do notify(title: text, message: text, icon: text = "", seconds: decimal = 5, sound: bool = true)
+    thread
+        _showNotification(title, message, icon, seconds, sound)
+    end
+end
+
+do notifyAndWait(title: text, message: text, icon: text = "", seconds: decimal = 5, sound: bool = true)
+    _showNotification(title, message, icon, seconds, sound)
 end

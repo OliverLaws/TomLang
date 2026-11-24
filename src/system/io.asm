@@ -9,6 +9,7 @@ global ReadLine
 global InputBuf
 global LoadFileArg
 global CheckMode
+global HintMode
 extern TestMode
 global SysAlloc
 global SysNowNs
@@ -32,7 +33,11 @@ extern CreateWaitableTimerExW
 extern SetWaitableTimer
 extern WaitForSingleObject
 extern Sleep
-global LoadFile
+global SysLoadFile
+global SysExePath
+global SysWriteWhole
+extern BuildMode
+extern ToolPath
 global ExeDir
 global MainPathPtr
 global SysLoadLib
@@ -90,10 +95,13 @@ InputBuf  resb 4096
 PathBuf   resb 1024
 FileBuf   resb 16777216
 CheckMode resq 1
+HintMode resq 1
 QpcFreq resq 1
 WaitTimer resq 1
 WaitTimerTried resq 1
 MainPathPtr resq 1
+ToolWord resq 1
+ToolTry resq 1
 FileSize resq 1
 
 section .data
@@ -331,8 +339,14 @@ LoadFileArg:
     jne .NotFlag
     cmp byte [rcx + 2], 't'
     je .TestFlag
+    cmp byte [rcx + 2], 'h'
+    jne .NotHint
+    mov qword [rel HintMode], 1
+    jmp .CheckFlag
+.NotHint:
     cmp byte [rcx + 2], 'c'
     jne .NotFlag
+.CheckFlag:
     mov qword [rel CheckMode], 1
     jmp .SkipFlag
 .TestFlag:
@@ -346,6 +360,39 @@ LoadFileArg:
     inc rcx
     jmp .SkipFlag
 .NotFlag:
+    mov al, [rcx + 3]
+    cmp al, ' '
+    je .MaybeTool
+    test al, al
+    jne .NotTool
+.MaybeTool:
+    mov eax, [rcx]
+    and eax, 0xFFFFFF
+    cmp eax, 0x746D66
+    je .Tool
+    cmp eax, 0x636F64
+    jne .NotTool
+.Tool:
+    mov [rel ToolWord], rcx
+    mov qword [rel ToolTry], 0
+.ToolTryPath:
+    lea rcx, [rel PathBuf]
+    mov rdx, [rel ToolWord]
+    mov r8, [rel ToolTry]
+    call ToolPath
+    jmp .OpenPath
+.NotTool:
+    cmp dword [rcx], 'buil'
+    jne .NotBuild
+    cmp byte [rcx + 4], 'd'
+    jne .NotBuild
+    cmp byte [rcx + 5], ' '
+    jne .NotBuild
+    mov qword [rel BuildMode], 1
+    mov qword [rel CheckMode], 1
+    add rcx, 5
+    jmp .SkipSpaces
+.NotBuild:
     cmp dword [rcx], 'test'
     jne .NotTestWord
     cmp byte [rcx + 4], ' '
@@ -375,6 +422,7 @@ LoadFileArg:
     jmp .Copy
 .CopyDone:
     mov byte [rdx], 0
+.OpenPath:
     lea rcx, [rel PathBuf]
     mov [rel MainPathPtr], rcx
     mov edx, 0x80000000
@@ -417,6 +465,13 @@ LoadFileArg:
     mov rdx, ErrPathLen
     jmp .Say
 .Fail:
+    cmp qword [rel ToolWord], 0
+    je .RealFail
+    cmp qword [rel ToolTry], 0
+    jne .RealFail
+    mov qword [rel ToolTry], 1
+    jmp .ToolTryPath
+.RealFail:
     lea rcx, [rel ErrOpen]
     mov rdx, ErrOpenLen
 .Say:
@@ -557,7 +612,7 @@ SysAlloc:
     pop rbp
     ret
 
-LoadFile:
+SysLoadFile:
     push rbx
     push rsi
     push rbp
@@ -613,6 +668,67 @@ LoadFile:
     xor edx, edx
     mov rsp, rbp
     pop rbp
+    pop rsi
+    pop rbx
+    ret
+
+SysExePath:
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 32
+    mov r8, rdx
+    mov rdx, rcx
+    xor ecx, ecx
+    call GetModuleFileNameA
+    mov eax, eax
+    mov rsp, rbp
+    pop rbp
+    ret
+
+SysWriteWhole:
+    push rbx
+    push rsi
+    push rdi
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 64
+    mov rsi, rdx
+    mov rdi, r8
+    mov edx, 0x40000000
+    xor r8d, r8d
+    xor r9d, r9d
+    mov qword [rsp + 32], 2
+    mov qword [rsp + 40], 0x80
+    mov qword [rsp + 48], 0
+    call CreateFileA
+    cmp rax, -1
+    je .Fail
+    mov rbx, rax
+    mov rcx, rbx
+    mov rdx, rsi
+    mov r8, rdi
+    lea r9, [rsp + 56]
+    mov qword [rsp + 56], 0
+    mov qword [rsp + 32], 0
+    call WriteFile
+    mov rsi, rax
+    mov rcx, rbx
+    call CloseHandle
+    test esi, esi
+    jz .Fail
+    mov eax, [rsp + 56]
+    cmp rax, rdi
+    jne .Fail
+    mov eax, 1
+    jmp .Out
+.Fail:
+    xor eax, eax
+.Out:
+    mov rsp, rbp
+    pop rbp
+    pop rdi
     pop rsi
     pop rbx
     ret

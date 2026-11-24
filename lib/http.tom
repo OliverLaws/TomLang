@@ -1,0 +1,627 @@
+use json
+
+dll "winhttp"
+    do _open(agent: number, accessType: uint, proxy: number, bypass: number, flags: uint): number as "WinHttpOpen"
+    do _connect(session: number, server: number, port: uint, reserved: uint): number as "WinHttpConnect"
+    do _openRequest(connection: number, verb: number, path: number, version: number, referrer: number, acceptTypes: number, flags: uint): number as "WinHttpOpenRequest"
+    do _addHeaders(request: number, headers: number, length: uint, modifiers: uint): bool as "WinHttpAddRequestHeaders"
+    do _sendRequest(request: number, headers: number, headersLength: uint, body: number, bodyLength: uint, totalLength: uint, context: number): bool as "WinHttpSendRequest"
+    do _receiveResponse(request: number, reserved: number): bool as "WinHttpReceiveResponse"
+    do _queryHeaders(request: number, info: uint, name: number, buffer: number, length: number, index: number): bool as "WinHttpQueryHeaders"
+    do _readData(request: number, buffer: number, size: uint, done: number): bool as "WinHttpReadData"
+    do _setTimeouts(handle: number, resolve: int, connect: int, send: int, receive: int): bool as "WinHttpSetTimeouts"
+    do _setOption(handle: number, option: uint, buffer: number, length: uint): bool as "WinHttpSetOption"
+    do _closeHandle(handle: number): bool as "WinHttpCloseHandle"
+end
+
+dll "kernel32"
+    do _toWide(codePage: uint, flags: uint, source: text, sourceLength: int, out: number, outLength: int): int as "MultiByteToWideChar"
+    do _fromWide(codePage: uint, flags: uint, source: number, sourceLength: int, out: number, outLength: int, fallback: number, usedFallback: number): int as "WideCharToMultiByte"
+    do _lastError(): uint as "GetLastError"
+    do _createFile(name: text, access: uint, share: uint, security: number, creation: uint, attributes: uint, template: number): number as "CreateFileA"
+    do _writeFile(handle: number, buffer: number, size: uint, done: number, overlapped: number): bool as "WriteFile"
+    do _readFile(handle: number, buffer: number, size: uint, done: number, overlapped: number): bool as "ReadFile"
+    do _fileSize(handle: number, size: number): bool as "GetFileSizeEx"
+    do _closeFile(handle: number): bool as "CloseHandle"
+end
+
+## Types
+
+record Response
+    status: number
+    ok: bool
+    body: text
+    headers: dictionary of text
+end
+
+record Client
+    baseUrl: text
+    headers: dictionary of text
+    timeout: decimal
+end
+
+record _Url
+    secure: bool
+    host: text
+    port: number
+    path: text
+end
+
+keep _Utf8 = 65001
+keep _AutoProxy = 4
+keep _DefaultProxy = 0
+keep _Secure = 8388608
+keep _AddReplace = 2684354560
+keep _StatusCode = 536870931
+keep _RawHeaders = 22
+keep _Decompression = 118
+keep _ChunkSize = 65536
+keep _BadHandle = -1
+
+do _wide(value: text): number
+    set count = _toWide(_Utf8, 0, value, -1, 0, 0)
+    set buffer = memory(count * 2 + 2)
+    _toWide(_Utf8, 0, value, -1, buffer, count)
+    return buffer
+end
+
+do _narrow(buffer: number, wideChars: number): text
+    if wideChars <= 0
+        return ""
+    end
+    set size = _fromWide(_Utf8, 0, buffer, wideChars, 0, 0, 0, 0)
+    set out = memory(size + 1)
+    later freeMemory(out)
+    _fromWide(_Utf8, 0, buffer, wideChars, out, size, 0, 0)
+    return readText(out, size)
+end
+
+do _errorText(code: number): text
+    check code
+        is 12002
+            return "timed out"
+        is 12007
+            return "server name not found"
+        is 12029
+            return "can't connect"
+        is 12030
+            return "connection dropped"
+        is 12152
+            return "bad reply from server"
+        is 12175
+            return "secure connection failed"
+        is 12005
+            return "bad url"
+    end
+    return "error {code}"
+end
+
+do _fail(url: text)
+    set code = _lastError()
+    fail "http: can't reach {url} ({_errorText(code)})"
+end
+
+do _parseUrl(url: text): _Url
+    set rest = url
+    set secure = false
+    if rest.startsWith("https://")
+        secure = true
+        rest = rest[9..rest.length]
+    otherwise if rest.startsWith("http://")
+        rest = rest[8..rest.length]
+    otherwise if rest.contains("://")
+        fail "http: only http:// and https:// urls work: {url}"
+    end
+    set slash = rest.length + 1
+    repeat each i, character in rest
+        if character == "/" or character == "?" or character == "#"
+            slash = i
+            stop
+        end
+    end
+    set hostPart = rest[1..slash - 1]
+    set path = "/"
+    if slash <= rest.length
+        path = rest[slash..rest.length]
+        if path.startsWith("?")
+            path = "/" + path
+        end
+    end
+    set cut = path.split("#")
+    path = cut[1]
+    if hostPart == ""
+        fail "http: no server name in {url}"
+    end
+    set port = 443 if secure otherwise 80
+    set colon = 0
+    repeat each i, character in hostPart
+        if character == ":"
+            colon = i
+        end
+    end
+    if colon > 0 and not hostPart.endsWith("]")
+        set portText = hostPart[colon + 1..hostPart.length]
+        try
+            port = number(portText)
+        otherwise
+            fail "http: bad port in {url}"
+        end
+        hostPart = hostPart[1..colon - 1]
+    end
+    return _Url(secure: secure, host: hostPart, port: port, path: path)
+end
+
+do _headerBlock(headers: dictionary of text): text
+    set lines: list of text = []
+    repeat each name, value in headers
+        lines.add(name + ": " + value + "\r\n")
+    end
+    return lines.join()
+end
+
+do _readStatus(request: number): number
+    set box = memory(8)
+    later freeMemory(box)
+    set sizeBox = memory(8)
+    later freeMemory(sizeBox)
+    write64(box, 0)
+    write64(sizeBox, 4)
+    _queryHeaders(request, _StatusCode, 0, box, sizeBox, 0)
+    return read32(box)
+end
+
+do _readHeaders(request: number): dictionary of text
+    set out: dictionary of text = {}
+    set sizeBox = memory(8)
+    later freeMemory(sizeBox)
+    write64(sizeBox, 0)
+    _queryHeaders(request, _RawHeaders, 0, 0, sizeBox, 0)
+    set size = read32(sizeBox)
+    if size == 0
+        return out
+    end
+    set buffer = memory(size + 2)
+    later freeMemory(buffer)
+    if not _queryHeaders(request, _RawHeaders, 0, buffer, sizeBox, 0)
+        return out
+    end
+    set raw = _narrow(buffer, read32(sizeBox) // 2)
+    repeat each i, line in raw.split("\r\n")
+        if i == 1 or line == ""
+            skip
+        end
+        set parts = line.split(": ")
+        if parts.length < 2
+            skip
+        end
+        set name = parts[1].lower()
+        set value = line[parts[1].length + 3..line.length]
+        if name in out
+            out[name] = out[name] + ", " + value
+        otherwise
+            out[name] = value
+        end
+    end
+    return out
+end
+
+do _send(method: text, url: text, body: number, bodyLength: number, headers: dictionary of text, timeout: decimal, intoFile: number): Response
+    set target = _parseUrl(url)
+    set agent = _wide("TomLang")
+    later freeMemory(agent)
+    set session = _open(agent, _AutoProxy, 0, 0, 0)
+    if session == 0
+        session = _open(agent, _DefaultProxy, 0, 0, 0)
+    end
+    if session == 0
+        _fail(url)
+    end
+    later _closeHandle(session)
+
+    set ms = round(timeout * 1000)
+    _setTimeouts(session, ms, ms, ms, ms)
+    set flagBox = memory(8)
+    later freeMemory(flagBox)
+    write32(flagBox, 3)
+    _setOption(session, _Decompression, flagBox, 4)
+
+    set host = _wide(target.host)
+    later freeMemory(host)
+    set connection = _connect(session, host, target.port, 0)
+    if connection == 0
+        _fail(url)
+    end
+    later _closeHandle(connection)
+
+    set verb = _wide(method.upper())
+    later freeMemory(verb)
+    set path = _wide(target.path)
+    later freeMemory(path)
+    set request = _openRequest(connection, verb, path, 0, 0, 0, _Secure if target.secure otherwise 0)
+    if request == 0
+        _fail(url)
+    end
+    later _closeHandle(request)
+
+    if headers.length > 0
+        set block = _wide(_headerBlock(headers))
+        later freeMemory(block)
+        _addHeaders(request, block, 4294967295, _AddReplace)
+    end
+
+    if not _sendRequest(request, 0, 0, body, bodyLength, bodyLength, 0)
+        _fail(url)
+    end
+    if not _receiveResponse(request, 0)
+        _fail(url)
+    end
+
+    set status = _readStatus(request)
+    set replyHeaders = _readHeaders(request)
+    set chunks: list of text = []
+    set buffer = memory(_ChunkSize)
+    later freeMemory(buffer)
+    set doneBox = memory(8)
+    later freeMemory(doneBox)
+    repeat forever
+        write64(doneBox, 0)
+        if not _readData(request, buffer, _ChunkSize, doneBox)
+            _fail(url)
+        end
+        set got = read32(doneBox)
+        if got == 0
+            stop
+        end
+        if intoFile != 0
+            if not _writeFile(intoFile, buffer, got, doneBox, 0)
+                fail "http: can't write the download"
+            end
+        otherwise
+            chunks.add(readText(buffer, got))
+        end
+    end
+    return Response(status: status, ok: status >= 200 and status < 300, body: chunks.join(), headers: replyHeaders)
+end
+
+do _sendText(method: text, url: text, body: text, headers: dictionary of text, timeout: decimal): Response
+    set size = byteLength(body)
+    if size == 0
+        return _send(method, url, 0, 0, headers, timeout, 0)
+    end
+    set place = memory(size + 1)
+    later freeMemory(place)
+    writeText(place, body)
+    return _send(method, url, place, size, headers, timeout, 0)
+end
+
+do _with(headers: dictionary of text, name: text, value: text): dictionary of text
+    set out: dictionary of text = {}
+    set found = false
+    repeat each key, item in headers
+        out[key] = item
+        if key.lower() == name.lower()
+            found = true
+        end
+    end
+    if not found
+        out[name] = value
+    end
+    return out
+end
+
+do _merge(first: dictionary of text, second: dictionary of text): dictionary of text
+    set out: dictionary of text = {}
+    repeat each key, item in first
+        out[key] = item
+    end
+    repeat each key, item in second
+        out[key] = item
+    end
+    return out
+end
+
+do _hex(n: number): text
+    set digits = "0123456789ABCDEF"
+    return digits[n // 16 + 1] + digits[n % 16 + 1]
+end
+
+do _hexValue(character: text): number
+    set code = charCode(character.upper())
+    if code >= 48 and code <= 57
+        return code - 48
+    end
+    if code >= 65 and code <= 70
+        return code - 55
+    end
+    return -1
+end
+
+do _isPlain(code: number): bool
+    return (code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 45 or code == 46 or code == 95 or code == 126
+end
+
+## Response helpers
+
+do Response.json(): json.Json
+    return json.parse(self.body)
+end
+
+do Response.header(name: text): text?
+    set key = name.lower()
+    if key in self.headers
+        return self.headers[key]
+    end
+    return nothing
+end
+
+## Core requests
+
+do request(method: text, url: text, body: text = "", headers: dictionary of text = {}, timeout: decimal = 30): Response
+    return _sendText(method, url, body, headers, timeout)
+end
+
+do get(url: text, headers: dictionary of text = {}, timeout: decimal = 30): Response
+    return _sendText("GET", url, "", headers, timeout)
+end
+
+do post(url: text, body: text = "", headers: dictionary of text = {}, timeout: decimal = 30): Response
+    return _sendText("POST", url, body, headers, timeout)
+end
+
+do put(url: text, body: text = "", headers: dictionary of text = {}, timeout: decimal = 30): Response
+    return _sendText("PUT", url, body, headers, timeout)
+end
+
+do patch(url: text, body: text = "", headers: dictionary of text = {}, timeout: decimal = 30): Response
+    return _sendText("PATCH", url, body, headers, timeout)
+end
+
+do delete(url: text, headers: dictionary of text = {}, timeout: decimal = 30): Response
+    return _sendText("DELETE", url, "", headers, timeout)
+end
+
+do head(url: text, headers: dictionary of text = {}, timeout: decimal = 30): Response
+    return _sendText("HEAD", url, "", headers, timeout)
+end
+
+## JSON and form helpers
+
+do getJson(url: text, headers: dictionary of text = {}, timeout: decimal = 30): json.Json
+    set reply = _sendText("GET", url, "", _with(headers, "Accept", "application/json"), timeout)
+    if not reply.ok
+        fail "http: {url} gave status {reply.status}"
+    end
+    return json.parse(reply.body)
+end
+
+do postJson(url: text, data: json.Json, headers: dictionary of text = {}, timeout: decimal = 30): Response
+    return _sendText("POST", url, json.stringify(data), _with(headers, "Content-Type", "application/json"), timeout)
+end
+
+do putJson(url: text, data: json.Json, headers: dictionary of text = {}, timeout: decimal = 30): Response
+    return _sendText("PUT", url, json.stringify(data), _with(headers, "Content-Type", "application/json"), timeout)
+end
+
+do patchJson(url: text, data: json.Json, headers: dictionary of text = {}, timeout: decimal = 30): Response
+    return _sendText("PATCH", url, json.stringify(data), _with(headers, "Content-Type", "application/json"), timeout)
+end
+
+do postForm(url: text, fields: dictionary of text, headers: dictionary of text = {}, timeout: decimal = 30): Response
+    set pairs: list of text = []
+    repeat each name, value in fields
+        pairs.add(encodeUrl(name) + "=" + encodeUrl(value))
+    end
+    return _sendText("POST", url, pairs.join("&"), _with(headers, "Content-Type", "application/x-www-form-urlencoded"), timeout)
+end
+
+## Files and binary
+
+do getBytes(url: text, headers: dictionary of text = {}, timeout: decimal = 30): list of number
+    set reply = _sendText("GET", url, "", headers, timeout)
+    if not reply.ok
+        fail "http: {url} gave status {reply.status}"
+    end
+    set size = byteLength(reply.body)
+    set out: list of number = []
+    if size == 0
+        return out
+    end
+    set place = memory(size + 1)
+    later freeMemory(place)
+    writeText(place, reply.body)
+    repeat i from 0 to size - 1
+        out.add(readByte(place + i))
+    end
+    return out
+end
+
+do download(url: text, filePath: text, headers: dictionary of text = {}, timeout: decimal = 60): bool
+    set handle = _createFile(filePath, 1073741824, 0, 0, 2, 128, 0)
+    if handle == _BadHandle
+        fail "http: can't write {filePath}"
+    end
+    set reply = Response(status: 0, ok: false, body: "", headers: {})
+    try
+        reply = _send("GET", url, 0, 0, headers, timeout, handle)
+    otherwise
+        _closeFile(handle)
+        fail "http: download of {url} failed"
+    end
+    _closeFile(handle)
+    return reply.ok
+end
+
+do uploadFile(url: text, fieldName: text, filePath: text, fields: dictionary of text = {}, headers: dictionary of text = {}, timeout: decimal = 60): Response
+    set handle = _createFile(filePath, 2147483648, 1, 0, 3, 128, 0)
+    if handle == _BadHandle
+        fail "http: can't read {filePath}"
+    end
+    later _closeFile(handle)
+    set sizeBox = memory(8)
+    later freeMemory(sizeBox)
+    _fileSize(handle, sizeBox)
+    set fileSize = read64(sizeBox)
+
+    set boundary = "----TomLang{random(100000000, 999999999)}"
+    set parts: list of text = []
+    repeat each name, value in fields
+        parts.add("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+    end
+    set fileName = filePath
+    repeat each character in filePath
+        if character == "\\" or character == "/"
+            fileName = ""
+        otherwise
+            fileName += character
+        end
+    end
+    parts.add("--{boundary}\r\nContent-Disposition: form-data; name=\"{fieldName}\"; filename=\"{fileName}\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+    set front = parts.join()
+    set back = "\r\n--{boundary}--\r\n"
+    set frontSize = byteLength(front)
+    set backSize = byteLength(back)
+    set total = frontSize + fileSize + backSize
+
+    set place = memory(total + 1)
+    later freeMemory(place)
+    writeText(place, front)
+    set doneBox = memory(8)
+    later freeMemory(doneBox)
+    set filled = 0
+    repeat forever
+        if filled >= fileSize
+            stop
+        end
+        write64(doneBox, 0)
+        if not _readFile(handle, place + frontSize + filled, fileSize - filled, doneBox, 0)
+            fail "http: can't read {filePath}"
+        end
+        set got = read32(doneBox)
+        if got == 0
+            stop
+        end
+        filled += got
+    end
+    writeText(place + frontSize + fileSize, back)
+    return _send("POST", url, place, total, _with(headers, "Content-Type", "multipart/form-data; boundary={boundary}"), timeout, 0)
+end
+
+## URL helpers
+
+do encodeUrl(value: text): text
+    set size = byteLength(value)
+    if size == 0
+        return ""
+    end
+    set place = memory(size + 1)
+    later freeMemory(place)
+    writeText(place, value)
+    set out: list of text = []
+    repeat i from 0 to size - 1
+        set code = readByte(place + i)
+        if _isPlain(code)
+            out.add(charFrom(code))
+        otherwise
+            out.add("%" + _hex(code))
+        end
+    end
+    return out.join()
+end
+
+do decodeUrl(value: text): text
+    set size = byteLength(value)
+    if size == 0
+        return ""
+    end
+    set place = memory(size + 1)
+    later freeMemory(place)
+    set count = 0
+    set letters = value.length
+    set i = 1
+    repeat forever
+        if i > letters
+            stop
+        end
+        set character = value[i]
+        if character == "%" and i + 2 <= letters and _hexValue(value[i + 1]) >= 0 and _hexValue(value[i + 2]) >= 0
+            writeByte(place + count, _hexValue(value[i + 1]) * 16 + _hexValue(value[i + 2]))
+            count += 1
+            i += 3
+        otherwise
+            set piece = " " if character == "+" otherwise character
+            writeText(place + count, piece)
+            count += byteLength(piece)
+            i += 1
+        end
+    end
+    return readText(place, count)
+end
+
+do buildUrl(base: text, params: dictionary of text): text
+    if params.length == 0
+        return base
+    end
+    set pairs: list of text = []
+    repeat each name, value in params
+        pairs.add(encodeUrl(name) + "=" + encodeUrl(value))
+    end
+    set joiner = "&" if base.contains("?") otherwise "?"
+    return base + joiner + pairs.join("&")
+end
+
+## Reusable client
+
+do client(baseUrl: text = "", headers: dictionary of text = {}, timeout: decimal = 30): Client
+    return Client(baseUrl: baseUrl, headers: _merge(headers, {}), timeout: timeout)
+end
+
+do Client.setHeader(name: text, value: text)
+    self.headers[name] = value
+end
+
+do Client.setBearer(token: text)
+    self.headers["Authorization"] = "Bearer " + token
+end
+
+do Client.request(method: text, path: text, body: text = "", headers: dictionary of text = {}): Response
+    set url = path
+    if not path.startsWith("http://") and not path.startsWith("https://")
+        set base = self.baseUrl
+        if base.endsWith("/") and path.startsWith("/")
+            url = base + path[2..path.length]
+        otherwise if not base.endsWith("/") and not path.startsWith("/") and path != ""
+            url = base + "/" + path
+        otherwise
+            url = base + path
+        end
+    end
+    return _sendText(method, url, body, _merge(self.headers, headers), self.timeout)
+end
+
+do Client.get(path: text, headers: dictionary of text = {}): Response
+    return self.request("GET", path, "", headers)
+end
+
+do Client.post(path: text, body: text = "", headers: dictionary of text = {}): Response
+    return self.request("POST", path, body, headers)
+end
+
+do Client.put(path: text, body: text = "", headers: dictionary of text = {}): Response
+    return self.request("PUT", path, body, headers)
+end
+
+do Client.patch(path: text, body: text = "", headers: dictionary of text = {}): Response
+    return self.request("PATCH", path, body, headers)
+end
+
+do Client.delete(path: text, headers: dictionary of text = {}): Response
+    return self.request("DELETE", path, "", headers)
+end
+
+do Client.postJson(path: text, data: json.Json, headers: dictionary of text = {}): Response
+    return self.request("POST", path, json.stringify(data), _with(headers, "Content-Type", "application/json"))
+end
+
+do Client.putJson(path: text, data: json.Json, headers: dictionary of text = {}): Response
+    return self.request("PUT", path, json.stringify(data), _with(headers, "Content-Type", "application/json"))
+end

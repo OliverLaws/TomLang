@@ -7,6 +7,7 @@ global Abort
 global FileMode
 global ReadMoreLine
 global Warn
+global Hint
 global UseWord
 global RecordLine
 global UseDepth
@@ -83,6 +84,10 @@ extern MakeTextFrom
 extern LoadFile
 extern ExeDir
 extern MainPathPtr
+extern PackInit
+extern PackRecordMain
+extern PackWrite
+extern BuildMode
 extern Advance
 extern Unread
 extern Alloc
@@ -92,6 +97,8 @@ extern StackBase
 extern InFn
 extern InstanceDepth
 extern PreScanActive
+extern TypeTable
+extern HintMode
 extern PreScanFail
 extern EmitGlobalInits
 extern PrimBranch
@@ -126,6 +133,23 @@ MissingEnd     db "missing its end:"
 MissingEndLen  equ $ - MissingEnd
 LineWord       db "line "
 WarnWord       db "warning "
+HintWord       db "hint "
+TxAny          db "any"
+TxNum          db "number"
+TxText         db "text"
+TxBool         db "bool"
+TxDec          db "decimal"
+TxNil          db "nothing"
+TxListOf       db "list of "
+TxDictOf       db "dictionary of "
+TxDictFrom     db "dictionary from "
+TxTo           db " to "
+TxDo           db "do("
+TxComma        db ", "
+TxColon        db ": "
+TxBar          db " | "
+TxNumeric      db "numeric"
+TxDots         db "..."
 WarnDead       db "this line never runs (it comes after return, stop or skip)"
 WarnDeadLen    equ $ - WarnDead
 WarnIndent     db "this might be missing its end (the end that closes it is lined up differently):"
@@ -159,6 +183,8 @@ UpLibDir       db "../lib/"
 DoWordAddr     dq DoWord, IfWord, RepeatWord, CheckWord, TryWord, DllWord
 
 section .bss
+HintBuf        resb 512
+HintDepth      resq 1
 RecoverPos  resq 1
 UseDepth    resq 1
 AliasPtr    resq 1
@@ -217,9 +243,21 @@ Start:
     call InitHeap
     call InitStack
     call RegisterNatives
+    call PackInit
+    test rdx, rdx
+    jnz .HaveMain
     call LoadFileArg
     test rdx, rdx
     jz Repl
+    cmp qword [rel BuildMode], 0
+    je .HaveMain
+    push rax
+    push rdx
+    mov rcx, rax
+    call PackRecordMain
+    pop rdx
+    pop rax
+.HaveMain:
     mov rcx, rax
     mov r8d, 1
     call TransformSource
@@ -1659,8 +1697,14 @@ SetMainFile:
 CheckDone:
     xor ecx, ecx
     cmp qword [rel ErrorCount], 0
-    je .Exit
+    je .Ok
     mov ecx, 1
+    jmp .Exit
+.Ok:
+    cmp qword [rel BuildMode], 0
+    je .Exit
+    call PackWrite
+    mov ecx, eax
 .Exit:
     and rsp, -16
     sub rsp, 32
@@ -1854,6 +1898,310 @@ Warn:
 .NoTok:
     call PrintNewLine
     mov rsp, rbp
+    pop r12
+    pop rbp
+    pop rbx
+    pop rdi
+    pop rsi
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    pop rax
+.Skip:
+    ret
+
+%macro HintText 2
+    lea rsi, [rel %1]
+    mov edx, %2
+    call HintPut
+%endmacro
+
+HintPut:
+    lea rax, [rel HintBuf + 480]
+.Loop:
+    test rdx, rdx
+    jz .Done
+    cmp rdi, rax
+    jae .Done
+    mov r11b, [rsi]
+    mov [rdi], r11b
+    inc rsi
+    inc rdi
+    dec rdx
+    jmp .Loop
+.Done:
+    ret
+
+HintChar:
+    lea rdx, [rel HintBuf + 480]
+    cmp rdi, rdx
+    jae .Done
+    mov [rdi], al
+    inc rdi
+.Done:
+    ret
+
+TypeText:
+    inc qword [rel HintDepth]
+    push rbx
+    push r12
+    push r13
+    mov rbx, rcx
+    cmp qword [rel HintDepth], 8
+    ja .Dots
+    test rbx, rbx
+    jz .Any
+    cmp rbx, 1
+    je .Num
+    cmp rbx, 2
+    je .Text
+    cmp rbx, 3
+    je .Bool
+    cmp rbx, 4
+    je .Dec
+    cmp rbx, 5
+    je .Nil
+    mov rax, rbx
+    shl rax, 5
+    lea r12, [rel TypeTable]
+    add r12, rax
+    mov rax, [r12]
+    cmp rax, 5
+    je .List
+    cmp rax, 6
+    je .Map
+    cmp rax, 7
+    je .Rec
+    cmp rax, 8
+    je .Named
+    cmp rax, 9
+    je .Func
+    cmp rax, 10
+    je .Var
+    cmp rax, 11
+    je .Union
+    cmp rax, 12
+    je .Nil
+    cmp rax, 13
+    je .Named
+    cmp rax, 14
+    je .Named
+.Any:
+    HintText TxAny, 3
+    jmp .Done
+.Dots:
+    HintText TxDots, 3
+    jmp .Done
+.Num:
+    HintText TxNum, 6
+    jmp .Done
+.Text:
+    HintText TxText, 4
+    jmp .Done
+.Bool:
+    HintText TxBool, 4
+    jmp .Done
+.Dec:
+    HintText TxDec, 7
+    jmp .Done
+.Nil:
+    HintText TxNil, 7
+    jmp .Done
+.List:
+    HintText TxListOf, 8
+    mov rcx, [r12 + 8]
+    call TypeText
+    jmp .Done
+.Map:
+    cmp qword [r12 + 16], 0
+    jne .Keyed
+    HintText TxDictOf, 14
+    mov rcx, [r12 + 8]
+    call TypeText
+    jmp .Done
+.Keyed:
+    HintText TxDictFrom, 16
+    mov rcx, [r12 + 16]
+    call TypeText
+    HintText TxTo, 4
+    mov rcx, [r12 + 8]
+    call TypeText
+    jmp .Done
+.Rec:
+    cmp qword [r12 + 8], 0
+    jne .Named
+    mov al, '{'
+    call HintChar
+    xor r13d, r13d
+.Field:
+    cmp r13, [r12 + 16]
+    jae .FieldsDone
+    test r13, r13
+    jz .FirstField
+    HintText TxComma, 2
+.FirstField:
+    mov rax, [r12 + 24]
+    lea rcx, [r13 + r13 * 2]
+    lea rbx, [rax + rcx * 8]
+    mov rsi, [rbx]
+    mov rdx, [rbx + 8]
+    call HintPut
+    HintText TxColon, 2
+    mov rcx, [rbx + 16]
+    call TypeText
+    inc r13
+    jmp .Field
+.FieldsDone:
+    mov al, '}'
+    call HintChar
+    jmp .Done
+.Named:
+    mov rax, [r12 + 8]
+    test rax, rax
+    jz .Any
+    lea rsi, [rax + 18]
+    movzx edx, byte [rax + 17]
+    call HintPut
+    jmp .Done
+.Func:
+    HintText TxDo, 3
+    xor r13d, r13d
+.Param:
+    cmp r13, [r12 + 16]
+    jae .ParamsDone
+    test r13, r13
+    jz .FirstParam
+    HintText TxComma, 2
+.FirstParam:
+    mov rax, [r12 + 24]
+    mov rcx, [rax + r13 * 8]
+    call TypeText
+    inc r13
+    jmp .Param
+.ParamsDone:
+    mov al, ')'
+    call HintChar
+    cmp qword [r12 + 8], 0
+    je .Done
+    HintText TxColon, 2
+    mov rcx, [r12 + 8]
+    call TypeText
+    jmp .Done
+.Var:
+    mov rax, [r12 + 8]
+    cmp rax, 26
+    jae .Numeric
+    add al, 'A'
+    call HintChar
+    jmp .Done
+.Numeric:
+    HintText TxNumeric, 7
+    jmp .Done
+.Union:
+    cmp qword [r12 + 16], 2
+    jne .Members
+    mov rax, [r12 + 24]
+    mov rcx, [rax]
+    cmp rcx, 5
+    je .OptSecond
+    cmp qword [rax + 8], 5
+    jne .Members
+    jmp .Optional
+.OptSecond:
+    mov rcx, [rax + 8]
+.Optional:
+    call TypeText
+    mov al, '?'
+    call HintChar
+    jmp .Done
+.Members:
+    xor r13d, r13d
+.Member:
+    cmp r13, [r12 + 16]
+    jae .Done
+    test r13, r13
+    jz .FirstMember
+    HintText TxBar, 3
+.FirstMember:
+    mov rax, [r12 + 24]
+    mov rcx, [rax + r13 * 8]
+    call TypeText
+    inc r13
+    jmp .Member
+.Done:
+    pop r13
+    pop r12
+    pop rbx
+    dec qword [rel HintDepth]
+    ret
+
+Hint:
+    cmp qword [rel HintMode], 0
+    je .Skip
+    cmp qword [rel PreScanActive], 0
+    jne .Skip
+    cmp qword [rel UseDepth], 0
+    jne .Skip
+    cmp qword [rel InstanceDepth], 0
+    jne .Skip
+    cmp qword [rel FileMode], 0
+    je .Skip
+    test r8, r8
+    jz .Skip
+    push rax
+    push rcx
+    push rdx
+    push r8
+    push r9
+    push r10
+    push r11
+    push rsi
+    push rdi
+    push rbx
+    push rbp
+    push r12
+    push r13
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 32
+    mov rbx, rcx
+    mov r12, rdx
+    mov r13, r9
+    mov qword [rel HintDepth], 0
+    lea rdi, [rel HintBuf]
+    mov rcx, r8
+    call TypeText
+    lea rax, [rel HintBuf]
+    sub rdi, rax
+    push rdi
+    push rdi
+    lea rcx, [rel HintWord]
+    mov edx, 5
+    call PrintString
+    mov rcx, r13
+    call LineOf
+    mov rcx, rax
+    call PrintNumber
+    mov al, ' '
+    lea rcx, [rel HintBuf + 500]
+    mov [rcx], al
+    mov edx, 1
+    call PrintString
+    mov rcx, rbx
+    mov rdx, r12
+    call PrintString
+    lea rcx, [rel Colon]
+    mov edx, 2
+    call PrintString
+    lea rcx, [rel HintBuf]
+    mov rdx, [rsp]
+    call PrintString
+    call PrintNewLine
+    mov rsp, rbp
+    pop r13
     pop r12
     pop rbp
     pop rbx
